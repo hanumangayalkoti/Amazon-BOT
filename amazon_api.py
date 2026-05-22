@@ -29,7 +29,6 @@ ASIN_PATTERN = re.compile(r"/(?:dp|gp/product|exec/obidos/ASIN|o/ASIN)/([A-Z0-9]
 
 
 def resolve_url(url: str) -> str:
-    """Follow redirects (e.g. amzn.to short links) to get the final URL."""
     try:
         resp = requests.head(url, allow_redirects=True, timeout=10,
                              headers={"User-Agent": "Mozilla/5.0"})
@@ -43,31 +42,22 @@ def resolve_url(url: str) -> str:
             return url
 
 
-def extract_asin(text: str) -> tuple[str | None, str | None]:
-    """
-    Returns (asin, error_message).
-    error_message is set if URL is a search page or unrecognizable.
-    """
+def extract_asin(text: str) -> tuple:
     text = text.strip()
 
-    # Direct ASIN (10 chars, uppercase alphanumeric)
     if re.fullmatch(r"[A-Z0-9]{10}", text):
         return text, None
 
-    # Short links like amzn.to or amzn.in — resolve first
     if re.search(r"amzn\.(to|in)/", text):
         text = resolve_url(text)
 
-    # Search page — no single ASIN possible
     if "/s?" in text or "/s/" in text:
         return None, "search"
 
-    # Try to extract ASIN from URL
     match = ASIN_PATTERN.search(text)
     if match:
         return match.group(1), None
 
-    # Also check query param e.g. ?ASIN=XXXXXXXXXX
     q_match = re.search(r"[?&]ASIN=([A-Z0-9]{10})", text)
     if q_match:
         return q_match.group(1), None
@@ -92,7 +82,7 @@ def _get_token() -> str:
         token_url,
         data={"grant_type": "client_credentials", "scope": SCOPE},
         auth=(CREDENTIAL_ID, CREDENTIAL_SECRET),
-        timeout=10,
+        timeout=15,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -112,7 +102,6 @@ def get_product_info(asin: str) -> dict:
             "itemInfo.title",
             "itemInfo.byLineInfo",
             "itemInfo.features",
-            "itemInfo.productInfo",
             "itemInfo.classifications",
             "offersV2.listings.price",
             "offersV2.listings.availability",
@@ -123,52 +112,61 @@ def get_product_info(asin: str) -> dict:
         ],
     }
 
-    resp = requests.post(
-        ITEMS_ENDPOINT,
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "x-marketplace": MARKETPLACE,
-            "Content-Type": "application/json",
-        },
-        timeout=15,
-    )
+    try:
+        resp = requests.post(
+            ITEMS_ENDPOINT,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "x-marketplace": MARKETPLACE,
+                "Content-Type": "application/json",
+            },
+            timeout=20,
+        )
+    except requests.Timeout:
+        raise RuntimeError("Amazon API timeout. Thodi der baad try karo.")
+    except requests.ConnectionError:
+        raise RuntimeError("Amazon API se connect nahi ho pa raha.")
 
-    if resp.status_code == 404:
-        raise ValueError("Product not found or unavailable.")
     if resp.status_code == 403:
         raise RuntimeError("Access denied. Check your API credentials.")
-    resp.raise_for_status()
+    if resp.status_code not in (200, 206):
+        raise RuntimeError(f"Amazon API error: {resp.status_code}")
 
     body = resp.json()
     items = body.get("itemsResult", {}).get("items", [])
+
+    # Even if items list is empty, check errors block for partial data
     if not items:
+        errors = body.get("errors", [])
+        if errors:
+            msg = errors[0].get("message", "Product not found.")
+            raise ValueError(msg)
         raise ValueError("Product not found or unavailable.")
 
     item = items[0]
     data: dict = {"asin": asin}
 
     # Title
-    title_obj = item.get("itemInfo", {}).get("title", {})
-    if title_obj:
-        data["title"] = title_obj.get("displayValue", "")
+    title_val = item.get("itemInfo", {}).get("title", {})
+    if title_val:
+        data["title"] = title_val.get("displayValue", "")
 
     # Brand
-    brand_obj = item.get("itemInfo", {}).get("byLineInfo", {}).get("brand", {})
-    if brand_obj:
-        data["brand"] = brand_obj.get("displayValue", "")
+    brand_val = item.get("itemInfo", {}).get("byLineInfo", {}).get("brand", {})
+    if brand_val:
+        data["brand"] = brand_val.get("displayValue", "")
 
     # Category
-    class_obj = item.get("itemInfo", {}).get("classifications", {})
-    if class_obj:
-        pg = class_obj.get("productGroup", {})
-        if pg:
-            data["category"] = pg.get("displayValue", "")
+    class_val = item.get("itemInfo", {}).get("classifications", {})
+    pg = class_val.get("productGroup", {}) if class_val else {}
+    if pg:
+        data["category"] = pg.get("displayValue", "")
 
-    # Features (bullet points) — top 3
-    features_obj = item.get("itemInfo", {}).get("features", {})
-    if features_obj:
-        vals = features_obj.get("displayValues", [])
+    # Features — top 3
+    feat_val = item.get("itemInfo", {}).get("features", {})
+    if feat_val:
+        vals = feat_val.get("displayValues", [])
         if vals:
             data["features"] = vals[:3]
 
@@ -177,10 +175,11 @@ def get_product_info(asin: str) -> dict:
     if img:
         data["image_url"] = img.get("url", "")
 
-    # Offers
+    # Offers — optional, product may be unavailable
     listings = item.get("offersV2", {}).get("listings", [])
     if listings:
         listing = listings[0]
+
         price_obj = listing.get("price", {})
         money = price_obj.get("money", {})
         if money:
@@ -198,10 +197,6 @@ def get_product_info(asin: str) -> dict:
         avail = listing.get("availability", {})
         if avail:
             data["availability"] = avail.get("message", "")
-
-        condition = listing.get("condition", {})
-        if condition:
-            data["condition"] = condition.get("displayValue", "")
 
         deal = listing.get("dealDetails", {})
         if deal:
