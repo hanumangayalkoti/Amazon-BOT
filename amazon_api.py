@@ -25,17 +25,54 @@ SCOPE = "creatorsapi::default" if CREDENTIAL_VERSION.startswith("3.") else "crea
 
 _token_cache: dict = {"token": None, "expires_at": 0}
 
-ASIN_REGEX = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
+ASIN_PATTERN = re.compile(r"/(?:dp|gp/product|exec/obidos/ASIN|o/ASIN)/([A-Z0-9]{10})")
 
 
-def extract_asin(text: str) -> str | None:
+def resolve_url(url: str) -> str:
+    """Follow redirects (e.g. amzn.to short links) to get the final URL."""
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=10,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        return resp.url
+    except Exception:
+        try:
+            resp = requests.get(url, allow_redirects=True, timeout=10,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            return resp.url
+        except Exception:
+            return url
+
+
+def extract_asin(text: str) -> tuple[str | None, str | None]:
+    """
+    Returns (asin, error_message).
+    error_message is set if URL is a search page or unrecognizable.
+    """
     text = text.strip()
+
+    # Direct ASIN (10 chars, uppercase alphanumeric)
     if re.fullmatch(r"[A-Z0-9]{10}", text):
-        return text
-    match = ASIN_REGEX.search(text)
+        return text, None
+
+    # Short links like amzn.to or amzn.in — resolve first
+    if re.search(r"amzn\.(to|in)/", text):
+        text = resolve_url(text)
+
+    # Search page — no single ASIN possible
+    if "/s?" in text or "/s/" in text:
+        return None, "search"
+
+    # Try to extract ASIN from URL
+    match = ASIN_PATTERN.search(text)
     if match:
-        return match.group(1)
-    return None
+        return match.group(1), None
+
+    # Also check query param e.g. ?ASIN=XXXXXXXXXX
+    q_match = re.search(r"[?&]ASIN=([A-Z0-9]{10})", text)
+    if q_match:
+        return q_match.group(1), None
+
+    return None, "invalid"
 
 
 def build_affiliate_link(asin: str) -> str:
@@ -53,10 +90,7 @@ def _get_token() -> str:
 
     resp = requests.post(
         token_url,
-        data={
-            "grant_type": "client_credentials",
-            "scope": SCOPE,
-        },
+        data={"grant_type": "client_credentials", "scope": SCOPE},
         auth=(CREDENTIAL_ID, CREDENTIAL_SECRET),
         timeout=10,
     )
@@ -77,8 +111,13 @@ def get_product_info(asin: str) -> dict:
             "images.primary.large",
             "itemInfo.title",
             "itemInfo.byLineInfo",
+            "itemInfo.features",
+            "itemInfo.productInfo",
+            "itemInfo.classifications",
             "offersV2.listings.price",
             "offersV2.listings.availability",
+            "offersV2.listings.condition",
+            "offersV2.listings.dealDetails",
             "customerReviews.count",
             "customerReviews.starRating",
         ],
@@ -102,27 +141,43 @@ def get_product_info(asin: str) -> dict:
     resp.raise_for_status()
 
     body = resp.json()
-    items_result = body.get("itemsResult", {})
-    items = items_result.get("items", [])
-
+    items = body.get("itemsResult", {}).get("items", [])
     if not items:
         raise ValueError("Product not found or unavailable.")
 
     item = items[0]
     data: dict = {"asin": asin}
 
+    # Title
     title_obj = item.get("itemInfo", {}).get("title", {})
     if title_obj:
         data["title"] = title_obj.get("displayValue", "")
 
+    # Brand
     brand_obj = item.get("itemInfo", {}).get("byLineInfo", {}).get("brand", {})
     if brand_obj:
         data["brand"] = brand_obj.get("displayValue", "")
 
+    # Category
+    class_obj = item.get("itemInfo", {}).get("classifications", {})
+    if class_obj:
+        pg = class_obj.get("productGroup", {})
+        if pg:
+            data["category"] = pg.get("displayValue", "")
+
+    # Features (bullet points) — top 3
+    features_obj = item.get("itemInfo", {}).get("features", {})
+    if features_obj:
+        vals = features_obj.get("displayValues", [])
+        if vals:
+            data["features"] = vals[:3]
+
+    # Image
     img = item.get("images", {}).get("primary", {}).get("large", {})
     if img:
         data["image_url"] = img.get("url", "")
 
+    # Offers
     listings = item.get("offersV2", {}).get("listings", [])
     if listings:
         listing = listings[0]
@@ -144,6 +199,15 @@ def get_product_info(asin: str) -> dict:
         if avail:
             data["availability"] = avail.get("message", "")
 
+        condition = listing.get("condition", {})
+        if condition:
+            data["condition"] = condition.get("displayValue", "")
+
+        deal = listing.get("dealDetails", {})
+        if deal:
+            data["deal_type"] = deal.get("dealType", "")
+
+    # Ratings
     cr = item.get("customerReviews", {})
     if cr.get("count") is not None:
         data["review_count"] = cr["count"]
