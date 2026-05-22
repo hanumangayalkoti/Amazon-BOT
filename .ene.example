@@ -1,8 +1,0 @@
-# ─── Telegram Bot ────────────────────────────────────────────
-BOT_TOKEN=your_telegram_bot_token_here
-
-# ─── Product API Credentials ─────────────────────────────────
-# Fill these in once you have your API access
-API_KEY=your_api_key_here
-API_SECRET=your_api_secret_here
-API_PARTNER_TAG=your_affiliate_tag_here
