@@ -26,7 +26,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Namaste! 🛍️\n\n"
         "Amazon India ka *kisi bhi product ka link* bhejo — main price, discount, rating aur affiliate link deta hoon.\n\n"
         "✅ *Supported links:*\n"
-        "• https://www.amazon.in/dp/B07QB413F2?tag=dealskoti-21?\n"
+        "• https://www.amazon.in/dp/B0DLFMFBJW\n"
         "• https://amzn.to/4fCHUBz\n"
         "• B0DLFMFBJW (sirf ASIN)\n\n"
         "❌ *Search page links kaam nahi karti* — kisi specific product ka link bhejo.",
@@ -42,7 +42,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(
             "⚠️ Yeh ek *search page* ka link hai — ismein koi specific product nahi hota.\n\n"
             "Kisi *ek product* pe click karo, phir us product page ka link bhejo.\n\n"
-            "Example: https://www.amazon.in/dp/B07QB413F2?tag=dealskoti-21?",
+            "Example: https://www.amazon.in/dp/B0DLFMFBJW",
             parse_mode="Markdown",
         )
         return
@@ -51,7 +51,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(
             "❌ Valid Amazon India link ya ASIN nahi mila.\n\n"
             "✅ *Supported formats:*\n"
-            "• https://www.amazon.in/dp/B07QB413F2?tag=dealskoti-21?\n"
+            "• https://www.amazon.in/dp/B0DLFMFBJW\n"
             "• https://amzn.to/4fCHUBz\n"
             "• B0DLFMFBJW",
             parse_mode="Markdown",
