@@ -24,13 +24,12 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Namaste! 🛍️\n\n"
-        "Amazon India ka *kisi bhi product ka link* bhejo — main price, discount, rating aur affiliate link deta hoon.\n\n"
-        "✅ *Supported links:*\n"
+        "Amazon India ka product link bhejo.\n\n"
+        "✅ Supported:\n"
         "• https://www.amazon.in/dp/B0DLFMFBJW\n"
         "• https://amzn.to/4fCHUBz\n"
         "• B0DLFMFBJW (sirf ASIN)\n\n"
-        "❌ *Search page links kaam nahi karti* — kisi specific product ka link bhejo.",
-        parse_mode="Markdown",
+        "❌ Search page links kaam nahi karti."
     )
 
 
@@ -40,169 +39,158 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if error == "search":
         await update.message.reply_text(
-            "⚠️ Yeh ek *search page* ka link hai — ismein koi specific product nahi hota.\n\n"
-            "Kisi *ek product* pe click karo, phir us product page ka link bhejo.\n\n"
-            "Example: https://www.amazon.in/dp/B0DLFMFBJW",
-            parse_mode="Markdown",
+            "⚠️ Yeh search page ka link hai.\n\n"
+            "Kisi ek product pe click karo, phir us product page ka link bhejo.\n"
+            "Example: https://www.amazon.in/dp/B0DLFMFBJW"
         )
         return
 
-    if error == "invalid" or not asin:
+    if not asin:
         await update.message.reply_text(
             "❌ Valid Amazon India link ya ASIN nahi mila.\n\n"
-            "✅ *Supported formats:*\n"
             "• https://www.amazon.in/dp/B0DLFMFBJW\n"
             "• https://amzn.to/4fCHUBz\n"
-            "• B0DLFMFBJW",
-            parse_mode="Markdown",
+            "• B0DLFMFBJW"
         )
         return
 
-    processing_msg = await update.message.reply_text("⏳ Product info fetch ho rahi hai...")
+    wait_msg = await update.message.reply_text("⏳ Product info fetch ho rahi hai...")
 
     try:
         info = get_product_info(asin)
     except ValueError as e:
-        await processing_msg.edit_text(f"❌ {e}")
+        await wait_msg.edit_text(f"❌ {e}")
         return
     except RuntimeError as e:
         logger.error("API error: %s", e)
-        await processing_msg.edit_text(
-            "❌ Amazon API se data nahi aaya. Thodi der baad try karo."
-        )
+        await wait_msg.edit_text("❌ Amazon API se data nahi aaya. Thodi der baad try karo.")
         return
 
-    lines = []
-
-    # Brand & Title
-    brand = info.get("brand", "")
-    title = info.get("title", "Title unavailable")
-    if brand:
-        lines.append(f"🏷️ *{esc(brand)}*")
-    lines.append(f"📦 {esc(title)}")
-
-    # Category
-    category = info.get("category", "")
-    if category:
-        lines.append(f"📂 {esc(category)}")
-
-    lines.append("")
-
-    # Price & Discount
-    price = info.get("price", "")
-    savings = info.get("savings", "")
-    discount_pct = info.get("discount_pct")
-
-    if price:
-        lines.append(f"💰 *Price:* {esc(price)}")
-    if discount_pct and savings:
-        lines.append(f"🔖 *Discount:* {esc(str(discount_pct))}% off \\(save {esc(savings)}\\)")
-    elif discount_pct:
-        lines.append(f"🔖 *Discount:* {esc(str(discount_pct))}% off")
-    elif savings:
-        lines.append(f"🔖 *Savings:* {esc(savings)}")
-
-    # Deal badge
-    deal_type = info.get("deal_type", "")
-    if deal_type:
-        lines.append(f"⚡ *Deal:* {esc(deal_type)}")
-
-    # Condition
-    condition = info.get("condition", "")
-    if condition and condition.lower() != "new":
-        lines.append(f"📋 *Condition:* {esc(condition)}")
-
-    # Availability
-    availability = info.get("availability", "")
-    if availability:
-        icon = "✅" if any(w in availability.lower() for w in ["stock", "available"]) else "⚠️"
-        lines.append(f"{icon} *Stock:* {esc(availability)}")
-
-    # Rating & Reviews
-    rating = info.get("rating", "")
-    review_count = info.get("review_count")
-    if rating and review_count is not None:
-        stars = _star_display(float(rating))
-        lines.append(f"⭐ {stars} {esc(str(rating))}/5 \\({esc(str(review_count))} reviews\\)")
-    elif rating:
-        lines.append(f"⭐ *Rating:* {esc(str(rating))}/5")
-
-    # Features
-    features = info.get("features", [])
-    if features:
-        lines.append("")
-        lines.append("✨ *Key Features:*")
-        for f in features:
-            short = f[:120] + "…" if len(f) > 120 else f
-            lines.append(f"• {esc(short)}")
-
-    # Affiliate Link
-    affiliate_link = info.get("affiliate_link", "")
-    lines.append("")
-    lines.append(f"🔗 [👉 Buy on Amazon India]({affiliate_link})")
-    lines.append(f"_tag: {esc(info.get('asin', ''))} \\| {esc('dealskoti-21')}_")
-
-    caption = "\n".join(lines)
-    image_url = info.get("image_url", "")
-
     try:
-        await processing_msg.delete()
+        await wait_msg.delete()
     except Exception:
         pass
+
+    caption = format_product(info)
+    image_url = info.get("image_url", "")
 
     try:
         if image_url:
             await update.message.reply_photo(
                 photo=image_url,
                 caption=caption,
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
             )
         else:
-            await update.message.reply_text(caption, parse_mode="MarkdownV2")
+            await update.message.reply_text(caption, parse_mode="HTML")
     except Exception as e:
-        logger.error("Send error (MarkdownV2): %s", e)
-        # Fallback — plain text
-        plain_lines = [
-            f"📦 {info.get('title', 'N/A')}",
-        ]
-        if brand:
-            plain_lines.insert(0, f"🏷️ {brand}")
-        if price:
-            plain_lines.append(f"💰 Price: {price}")
-        if discount_pct:
-            plain_lines.append(f"🔖 Discount: {discount_pct}%")
-        if availability:
-            plain_lines.append(f"✅ Stock: {availability}")
-        if rating:
-            plain_lines.append(f"⭐ Rating: {rating}/5 ({review_count} reviews)")
-        if features:
-            plain_lines.append("✨ Features:")
-            for f in features:
-                plain_lines.append(f"  • {f[:100]}")
-        plain_lines.append(f"🔗 {affiliate_link}")
-        try:
-            if image_url:
-                await update.message.reply_photo(
-                    photo=image_url,
-                    caption="\n".join(plain_lines),
-                )
-            else:
-                await update.message.reply_text("\n".join(plain_lines))
-        except Exception as e2:
-            logger.error("Fallback send error: %s", e2)
+        logger.error("Send error: %s", e)
+        await update.message.reply_text(format_product_plain(info))
 
 
-def _star_display(rating: float) -> str:
+def format_product(info: dict) -> str:
+    lines = []
+
+    brand = info.get("brand", "")
+    title = info.get("title", "")
+    category = info.get("category", "")
+    price = info.get("price", "")
+    discount_pct = info.get("discount_pct")
+    savings = info.get("savings", "")
+    availability = info.get("availability", "")
+    rating = info.get("rating", "")
+    review_count = info.get("review_count")
+    features = info.get("features", [])
+    affiliate_link = info.get("affiliate_link", "")
+    asin = info.get("asin", "")
+
+    if brand:
+        lines.append(f"<b>Brand</b> - {brand}")
+
+    if title:
+        short = title[:200] + "…" if len(title) > 200 else title
+        lines.append(f"<b>Product Name</b> - {short}")
+
+    if category:
+        lines.append(f"<b>Category</b> - {category}")
+
+    lines.append("")
+
+    if price:
+        lines.append(f"💰 <b>Price</b> - {price}")
+    else:
+        lines.append("⚠️ <b>Stock</b> - Currently Unavailable")
+
+    if discount_pct and savings:
+        lines.append(f"🔖 <b>Discount</b> - {discount_pct}% off (save {savings})")
+    elif discount_pct:
+        lines.append(f"🔖 <b>Discount</b> - {discount_pct}% off")
+
+    if availability and price:
+        icon = "✅" if any(w in availability.lower() for w in ["in stock", "available"]) else "⚠️"
+        lines.append(f"{icon} <b>Stock</b> - {availability}")
+
+    if rating:
+        stars = star_bar(float(rating))
+        if review_count is not None:
+            lines.append(f"⭐ <b>Rating</b> - {stars} {rating}/5 ({review_count} reviews)")
+        else:
+            lines.append(f"⭐ <b>Rating</b> - {stars} {rating}/5")
+
+    if features:
+        lines.append("")
+        lines.append("✨ <b>Key Features</b>")
+        for f in features:
+            short_f = f[:150] + "…" if len(f) > 150 else f
+            lines.append(f"• {short_f}")
+
+    lines.append("")
+
+    if affiliate_link:
+        lines.append(f'<b><a href="{affiliate_link}">🛒 Buy Now on Amazon India</a></b>')
+
+    if asin:
+        camel = f"https://camelcamelcamel.com/product/{asin}"
+        lines.append(f'<a href="{camel}">📈 Price History</a>')
+
+    return "\n".join(lines)
+
+
+def format_product_plain(info: dict) -> str:
+    lines = []
+    if info.get("brand"):
+        lines.append(f"Brand - {info['brand']}")
+    if info.get("title"):
+        lines.append(f"Product Name - {info['title'][:200]}")
+    if info.get("category"):
+        lines.append(f"Category - {info['category']}")
+    lines.append("")
+    if info.get("price"):
+        lines.append(f"💰 Price - {info['price']}")
+    if info.get("discount_pct"):
+        lines.append(f"🔖 Discount - {info['discount_pct']}% off")
+    if info.get("availability"):
+        lines.append(f"✅ Stock - {info['availability']}")
+    if info.get("rating"):
+        lines.append(f"⭐ Rating - {info['rating']}/5")
+    features = info.get("features", [])
+    if features:
+        lines.append("\n✨ Key Features")
+        for f in features:
+            lines.append(f"• {f[:150]}")
+    lines.append("")
+    if info.get("affiliate_link"):
+        lines.append(f"🛒 Buy Now: {info['affiliate_link']}")
+    if info.get("asin"):
+        lines.append(f"📈 Price History: https://camelcamelcamel.com/product/{info['asin']}")
+    return "\n".join(lines)
+
+
+def star_bar(rating: float) -> str:
     full = int(rating)
     half = 1 if (rating - full) >= 0.5 else 0
     empty = 5 - full - half
     return "★" * full + "½" * half + "☆" * empty
-
-
-def esc(text: str) -> str:
-    """Escape special chars for MarkdownV2."""
-    special = r"\_*[]()~`>#+-=|{}.!"
-    return "".join(f"\\{c}" if c in special else c for c in str(text))
 
 
 def main() -> None:
