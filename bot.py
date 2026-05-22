@@ -147,7 +147,7 @@ def format_product(info: dict) -> str:
     lines.append("")
 
     if affiliate_link:
-        lines.append(f'<b><a href="{affiliate_link}">🛒 Buy Now on Amazon India</a></b>')
+        lines.append(f'<b><a href="{affiliate_link}">🛒 Buy Now </a></b>')
 
     if asin:
         camel = f"https://camelcamelcamel.com/product/{asin}"
