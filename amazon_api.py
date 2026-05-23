@@ -19,7 +19,7 @@ VERSION_TOKEN_URLS = {
 }
 
 SCOPE    = "creatorsapi::default" if CREDENTIAL_VERSION.startswith("3.") else "creatorsapi/default"
-API_BASE = "https://creatorsapi.amazon.in"
+API_BASE = "https://creatorsapi.amazon"
 
 ITEMS_ENDPOINT  = f"{API_BASE}/catalog/v1/getItems"
 SEARCH_ENDPOINT = f"{API_BASE}/catalog/v1/searchItems"
@@ -39,6 +39,17 @@ PRODUCT_RESOURCES = [
     "offersV2.listings.condition",
     "offersV2.listings.dealDetails",
     "customerReviews.count",
+    "customerReviews.starRating",
+]
+
+SEARCH_RESOURCES = [
+    "images.primary.medium",
+    "itemInfo.title",
+    "itemInfo.byLineInfo",
+    "itemInfo.classifications",
+    "offersV2.listings.price",
+    "offersV2.listings.availability",
+    "offersV2.listings.dealDetails",
     "customerReviews.starRating",
 ]
 
@@ -208,7 +219,7 @@ def search_items(query: str, count: int = 5) -> list:
         "keywords": query,
         "searchIndex": "All",
         "itemCount": count,
-        "resources": PRODUCT_RESOURCES,
+        "resources": SEARCH_RESOURCES,
     }
     try:
         resp = requests.post(
