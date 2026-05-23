@@ -294,9 +294,9 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("compare_step", None)
     first = update.effective_user.first_name or "dost"
     await update.message.reply_text(
-        f"🤖 Hi <b>{first}!</b> Main hoon Simi — teri shopping assistant! 😊\n\n"
-        "Koi bhi shopping sawaal pooch — products, deals, comparisons, buying advice!\n"
-        "<i>(Off-topic? Main wapas shopping pe le aaungi 😄)</i>",
+        f"🤖 Hi <b>{first}!</b> Main hoon Simi — aapki shopping assistant! 😊\n\n"
+        "Aap mujhse Shopping ke related sawaal pooch sakte ho— products, deals, comparisons, buying advice!\n"
+        "<i>(Main sirf shopping ke baare mein hi jaanti hoon. Isliye please out-of-syllabus sawaal mat poochna 😄)</i>",
         parse_mode="HTML",
     )
 
