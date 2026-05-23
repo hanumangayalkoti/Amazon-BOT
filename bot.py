@@ -162,7 +162,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🔔 Price alert set karo — price gire toh notify\n"
         "• ⚖️ /compare — 2 products compare karo\n"
         "• 💾 Wishlist mein save karo\n"
-        "• 🤖 /support — Simi se shopping advice lo\n\n"
+        "• 🤖 /Simi — Simi se shopping advice le sakte ho\n\n"
         "Seedha link bhejo ya kuch bolo — shuru karte hain! 👇",
         parse_mode="HTML",
     )
@@ -186,7 +186,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  Product card mein 💾 button dabao\n"
         "  /mywishlist — wishlist dekho\n\n"
         "<b>🤖 Simi:</b>\n"
-        "  /support — shopping assistant activate\n\n"
+        "  /simi — shopping assistant activate\n\n"
         "<b>Affiliate tag:</b> <code>dealskoti-21</code> (auto-embed)",
         parse_mode="HTML",
     )
@@ -287,16 +287,32 @@ async def cmd_mywishlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.1)
 
 
-async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_simi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["simi_active"] = True
     context.user_data["waiting_for_search"] = False
     context.user_data["waiting_for_track"]  = False
     context.user_data.pop("compare_step", None)
     first = update.effective_user.first_name or "dost"
     await update.message.reply_text(
-        f"🤖 Hi <b>{first}!</b> Main hoon Simi — aapki shopping assistant! 😊\n\n"
-        "Aap mujhse Shopping ke related sawaal pooch sakte ho— products, deals, comparisons, buying advice!\n"
-        "<i>(Main sirf shopping ke baare mein hi jaanti hoon. Isliye please out-of-syllabus sawaal mat poochna 😄)</i>",
+        f"🟢 <b>Simi Mode ON</b>\n\n"
+        f"Hi <b>{first}!</b> Main hoon Simi — teri shopping assistant! 😊\n\n"
+        "Koi bhi shopping sawaal pooch — products, deals, comparisons, buying advice!\n\n"
+        "<i>Amazon link bhejoge toh product card bhi dikhega!\n"
+        "Simi se bahar jaane ke liye /stop type karo.</i>",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("simi_active", None)
+    context.user_data.pop("simi_history", None)
+    context.user_data.pop("compare_step", None)
+    context.user_data.pop("waiting_for_search", None)
+    context.user_data.pop("waiting_for_track", None)
+    await update.message.reply_text(
+        "🔴 <b>Simi Mode OFF</b>\n\n"
+        "Normal mode mein wapas aa gaye!\n"
+        "Seedha Amazon link ya query type karo — main dhundh lunga 🛍️",
         parse_mode="HTML",
     )
 
@@ -482,30 +498,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Valid Amazon link nahi mila. /track dobara try karo.")
         return
 
+    detected_intent = None
+
     if simi_active:
-        intent = await asyncio.to_thread(ai.detect_intent, text)
-        if intent == "product_link":
+        detected_intent = await asyncio.to_thread(ai.detect_intent, text)
+        if detected_intent == "product_link":
             pass
-        elif intent in ("search_query", "alert_request"):
-            if intent == "alert_request":
-                query = await asyncio.to_thread(ai.extract_search_query_from_alert, text)
-                await _do_search(update.message, context, query, with_alert_note=True)
-            else:
-                await _do_search(update.message, context, text)
+        elif detected_intent == "alert_request":
+            query = await asyncio.to_thread(ai.extract_search_query_from_alert, text)
+            await _do_search(update.message, context, query, with_alert_note=True)
             return
         else:
             if "simi_history" not in context.user_data:
                 context.user_data["simi_history"] = []
             history = context.user_data["simi_history"]
             await update.message.chat.send_action(constants.ChatAction.TYPING)
-            reply   = await asyncio.to_thread(ai.simi_reply, user.first_name or "dost", history, text)
+            reply = await asyncio.to_thread(ai.simi_reply, user.first_name or "dost", history, text)
             history.append({"role": "user",      "content": text})
             history.append({"role": "assistant", "content": reply})
             context.user_data["simi_history"] = history[-20:]
-            await update.message.reply_text(reply)
+            footer = "\n\n— Simi 🤖  |  /search karo ya seedha query type karo"
+            await update.message.reply_text(reply + footer)
             return
 
-    intent = await asyncio.to_thread(ai.detect_intent, text)
+    intent = detected_intent or await asyncio.to_thread(ai.detect_intent, text)
 
     if intent == "product_link":
         asin, error = api.extract_asin(text)
@@ -697,7 +713,8 @@ def main():
     app.add_handler(CommandHandler("track",      cmd_track))
     app.add_handler(CommandHandler("myalerts",   cmd_myalerts))
     app.add_handler(CommandHandler("mywishlist", cmd_mywishlist))
-    app.add_handler(CommandHandler("support",    cmd_support))
+    app.add_handler(CommandHandler("simi",    cmd_simi))
+    app.add_handler(CommandHandler("stop",       cmd_stop))
 
     app.add_handler(CommandHandler("users",      adm.cmd_users))
     app.add_handler(CommandHandler("links",      adm.cmd_links))
