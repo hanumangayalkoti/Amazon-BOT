@@ -14,7 +14,6 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
-    PostgresPersistence,
     filters,
 )
 
@@ -32,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN     = os.environ["BOT_TOKEN"]
 ADMIN_CHAT_ID = os.environ["ADMIN_CHAT_ID"]
-DATABASE_URL  = os.environ["DATABASE_URL"]
 
 
 def product_keyboard(asin: str) -> InlineKeyboardMarkup:
@@ -672,12 +670,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     db.init_db()
 
-    persistence = PostgresPersistence(url=DATABASE_URL)
-
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .persistence(persistence)
         .build()
     )
 
