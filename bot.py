@@ -162,7 +162,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🔔 Price alert set karo — price gire toh notify\n"
         "• ⚖️ /compare — 2 products compare karo\n"
         "• 💾 Wishlist mein save karo\n"
-        "• 🤖 /Simi — Simi se shopping advice le sakte ho\n\n"
+        "• 🤖 /support — Simi se shopping advice lo\n\n"
         "Seedha link bhejo ya kuch bolo — shuru karte hain! 👇",
         parse_mode="HTML",
     )
@@ -186,7 +186,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  Product card mein 💾 button dabao\n"
         "  /mywishlist — wishlist dekho\n\n"
         "<b>🤖 Simi:</b>\n"
-        "  /simi — shopping assistant activate\n\n"
+        "  /support — shopping assistant activate\n\n"
         "<b>Affiliate tag:</b> <code>dealskoti-21</code> (auto-embed)",
         parse_mode="HTML",
     )
@@ -287,7 +287,7 @@ async def cmd_mywishlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.1)
 
 
-async def cmd_simi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["simi_active"] = True
     context.user_data["waiting_for_search"] = False
     context.user_data["waiting_for_track"]  = False
@@ -464,6 +464,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("compare_asin1", None)
         await _do_compare(update.message, context, info1, info2)
         return
+
+    # ── UNIVERSAL RULE: Amazon link in ANY mode → always show product card ──
+    _early_asin, _early_error = api.extract_asin(text)
+    if _early_asin:
+        context.user_data.pop("waiting_for_search", None)
+        context.user_data.pop("waiting_for_track",  None)
+        wait = await update.message.reply_text("⏳ Product info fetch ho rahi hai...")
+        try:
+            info = await asyncio.to_thread(api.get_product_info, _early_asin)
+        except Exception:
+            await wait.edit_text("❌ Product nahi mila — Amazon link check karo.")
+            return
+        await wait.delete()
+        await _send_product_card(update.message, context, info)
+        return
+    if _early_error == "search":
+        await update.message.reply_text(
+            "⚠️ Yeh Amazon search page ka link hai — pehle kisi ek product pe click karo, "
+            "phir us product ka link bhejo 😊"
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────────
 
     if waiting_search:
         context.user_data["waiting_for_search"] = False
@@ -713,7 +735,7 @@ def main():
     app.add_handler(CommandHandler("track",      cmd_track))
     app.add_handler(CommandHandler("myalerts",   cmd_myalerts))
     app.add_handler(CommandHandler("mywishlist", cmd_mywishlist))
-    app.add_handler(CommandHandler("simi",    cmd_simi))
+    app.add_handler(CommandHandler("support",    cmd_support))
     app.add_handler(CommandHandler("stop",       cmd_stop))
 
     app.add_handler(CommandHandler("users",      adm.cmd_users))
