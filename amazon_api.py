@@ -92,7 +92,8 @@ def extract_asin(text: str) -> tuple:
 
 
 def build_affiliate_link(asin: str) -> str:
-    return f"https://www.amazon.in/dp/{asin}?tag={PARTNER_TAG}"
+    tag = PARTNER_TAG.strip().rstrip("?&/ ")
+    return f"https://www.amazon.in/dp/{asin}?tag={tag}"
 
 
 def _get_token() -> str:
