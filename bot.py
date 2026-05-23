@@ -7,6 +7,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    constants,
 )
 from telegram.ext import (
     Application,
@@ -482,15 +483,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if simi_active:
-        if "simi_history" not in context.user_data:
-            context.user_data["simi_history"] = []
-        history  = context.user_data["simi_history"]
-        reply    = await asyncio.to_thread(ai.simi_reply, user.first_name or "dost", history, text)
-        history.append({"role": "user",      "content": text})
-        history.append({"role": "assistant", "content": reply})
-        context.user_data["simi_history"] = history[-20:]
-        await update.message.reply_text(reply)
-        return
+        intent = await asyncio.to_thread(ai.detect_intent, text)
+        if intent == "product_link":
+            pass
+        elif intent in ("search_query", "alert_request"):
+            if intent == "alert_request":
+                query = await asyncio.to_thread(ai.extract_search_query_from_alert, text)
+                await _do_search(update.message, context, query, with_alert_note=True)
+            else:
+                await _do_search(update.message, context, text)
+            return
+        else:
+            if "simi_history" not in context.user_data:
+                context.user_data["simi_history"] = []
+            history = context.user_data["simi_history"]
+            await update.message.chat.send_action(constants.ChatAction.TYPING)
+            reply   = await asyncio.to_thread(ai.simi_reply, user.first_name or "dost", history, text)
+            history.append({"role": "user",      "content": text})
+            history.append({"role": "assistant", "content": reply})
+            context.user_data["simi_history"] = history[-20:]
+            await update.message.reply_text(reply)
+            return
 
     intent = await asyncio.to_thread(ai.detect_intent, text)
 
@@ -541,6 +554,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "simi_history" not in context.user_data:
             context.user_data["simi_history"] = []
         history = context.user_data["simi_history"]
+        await update.message.chat.send_action(constants.ChatAction.TYPING)
         reply   = await asyncio.to_thread(ai.simi_reply, user.first_name or "dost", history, text)
         history.append({"role": "user",      "content": text})
         history.append({"role": "assistant", "content": reply})
