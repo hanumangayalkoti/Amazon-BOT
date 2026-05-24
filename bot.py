@@ -58,7 +58,21 @@ def search_result_keyboard(asin: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("💾 Wishlist", callback_data=f"wish_{asin}"),
         ],
         [
-            InlineKeyboardButton("📋 Details", callback_data=f"features_{asin}"),
+            InlineKeyboardButton("📋 Details", callback_data=f"detail_{asin}"),
+        ],
+    ])
+
+
+def detail_back_keyboard(asin: str) -> InlineKeyboardMarkup:
+    link = api.build_affiliate_link(asin)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛒 Buy Now", url=link),
+            InlineKeyboardButton("🔔 Alert", callback_data=f"alert_{asin}"),
+            InlineKeyboardButton("💾 Wishlist", callback_data=f"wish_{asin}"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back to Results", callback_data=f"back_{asin}"),
         ],
     ])
 
@@ -94,8 +108,20 @@ def format_product_card(info: dict) -> str:
         lines.append(f"{icon} <b>Stock</b> — {info['availability']}")
     if info.get("rating"):
         stars = star_bar(float(info["rating"]))
-        rc    = f" ({info['review_count']:,} reviews)" if info.get("review_count") else ""
-        lines.append(f"⭐ <b>Rating</b> — {stars} {info['rating']}/5{rc}")
+        lines.append(f"⭐ <b>Rating</b> — {stars} {info['rating']}/5")
+    if info.get("review_count"):
+        lines.append(f"💬 <b>Reviews</b> — {info['review_count']:,} ratings")
+    return "\n".join(lines)
+
+
+def format_detail_card(info: dict) -> str:
+    """Full card with features — used in Details view."""
+    lines = [format_product_card(info)]
+    features = info.get("features", [])
+    if features:
+        lines.append("\n📋 <b>Key Features:</b>")
+        for f in features[:4]:
+            lines.append(f"• {f[:180]}")
     return "\n".join(lines)
 
 
@@ -321,7 +347,8 @@ async def _do_search(message, context, query: str, with_alert_note: bool = False
     wait = await message.reply_text(f"🔍 <b>'{query}'</b> search ho rahi hai...", parse_mode="HTML")
     try:
         results = await asyncio.to_thread(api.search_items, query, 5)
-    except Exception:
+    except Exception as e:
+        print(f"[Search Error] query='{query}' error={e}")
         await wait.edit_text("❌ Search mein kuch dikkat aayi. Thodi der baad try karo 🙏")
         return
 
@@ -636,6 +663,50 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Price giregi toh seedha notify karunga! 📲",
             parse_mode="HTML",
         )
+
+    elif data.startswith("detail_"):
+        asin = data[7:]
+        info = cache.get(asin)
+        if not info:
+            try:
+                info = await asyncio.to_thread(api.get_product_info, asin)
+                if "product_cache" not in context.user_data:
+                    context.user_data["product_cache"] = {}
+                context.user_data["product_cache"][asin] = info
+            except Exception as e:
+                print(f"[Detail Error] asin={asin} {e}")
+                await query.answer("❌ Product info load nahi hui.", show_alert=True)
+                return
+        caption = format_detail_card(info)
+        kb = detail_back_keyboard(asin)
+        try:
+            if query.message.photo:
+                await query.edit_message_caption(caption, parse_mode="HTML", reply_markup=kb)
+            else:
+                await query.edit_message_text(caption, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            print(f"[Detail Edit Error] {e}")
+            await query.answer("❌ Edit nahi ho saka.", show_alert=True)
+
+    elif data.startswith("back_"):
+        asin = data[5:]
+        info = cache.get(asin)
+        if not info:
+            try:
+                info = await asyncio.to_thread(api.get_product_info, asin)
+            except Exception:
+                await query.answer("❌ Product info nahi mili.", show_alert=True)
+                return
+        caption = format_product_card(info)
+        kb = search_result_keyboard(asin)
+        try:
+            if query.message.photo:
+                await query.edit_message_caption(caption, parse_mode="HTML", reply_markup=kb)
+            else:
+                await query.edit_message_text(caption, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            print(f"[Back Edit Error] {e}")
+            await query.answer("❌ Wapas nahi ja saka.", show_alert=True)
 
     elif data.startswith("features_"):
         asin = data[9:]
