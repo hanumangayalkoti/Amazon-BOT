@@ -229,7 +229,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /mywishlist — wishlist dekho\n\n"
         "<b>🤖 Simi:</b>\n"
         "  /simi — shopping assistant activate\n\n"
-        ,
+        "<b>Affiliate tag:</b> <code>dealskoti-21</code> (auto-embed)",
         parse_mode="HTML",
     )
 
