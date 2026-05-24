@@ -200,7 +200,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🔔 Price alert set karo — price gire toh notify\n"
         "• ⚖️ /compare — 2 products compare karo\n"
         "• 💾 Wishlist mein save karo\n"
-        "• 🤖 /support — Simi se shopping advice lo\n\n"
+        "• 🤖 /simi — Simi se shopping advice lo\n\n"
         "Seedha link bhejo ya kuch bolo — shuru karte hain! 👇",
         parse_mode="HTML",
     )
@@ -224,7 +224,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  Product card mein 💾 button dabao\n"
         "  /mywishlist — wishlist dekho\n\n"
         "<b>🤖 Simi:</b>\n"
-        "  /support — shopping assistant activate\n\n"
+        "  /simi — shopping assistant activate\n\n"
         "<b>Affiliate tag:</b> <code>dealskoti-21</code> (auto-embed)",
         parse_mode="HTML",
     )
