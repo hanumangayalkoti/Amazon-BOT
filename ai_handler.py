@@ -3,8 +3,14 @@ import json
 from datetime import date
 from openai import OpenAI
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is not set. Add it in Railway Secrets.")
+
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+INTENT_MODEL = "gpt-4o-mini"
+CHAT_MODEL   = "gpt-4.1-mini"
 
 INTENT_PROMPT = """Classify this user message into exactly one intent:
 - "product_link": contains an Amazon URL or a standalone ASIN (10 chars, starts with B or number)
@@ -20,9 +26,9 @@ SIMI_SYSTEM = """You are Simi, a warm and helpful Amazon India shopping assistan
 
 TODAY'S DATE: {today}
 IMPORTANT — YOUR KNOWLEDGE:
-- Your training data goes up to early 2024. Products released AFTER that (e.g. iPhone 17, Galaxy S25, etc.) may be real but you don't have full details.
-- When asked about "latest" models, tell them what you know (e.g. iPhone 16 series was latest as of your knowledge) BUT always add: "Exact latest model ke liye seedha Amazon pe search karo — live prices aur availability wahan dikhegi!"
-- NEVER confidently say "X is the latest" for fast-moving categories like phones, laptops, TVs.
+- Use your own training knowledge honestly — do NOT assume your cutoff is "early 2024". Share what you actually know.
+- For fast-moving categories (phones, laptops, TVs, earbuds), ALWAYS end with: "Exact latest model aur live price ke liye seedha Amazon pe search karo!"
+- NEVER guess or make up specs/prices — only share what you are confident about from training.
 
 HOW THIS BOT WORKS (very important — you must know this):
 - Users can just TYPE any product name or query (like "iPhone" or "best headphones under 2000") and the bot will automatically search Amazon India and show results with Buy buttons.
@@ -51,9 +57,10 @@ User's first name: {first_name}"""
 
 
 def detect_intent(message: str) -> str:
+    raw = "N/A"
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=INTENT_MODEL,
             messages=[
                 {"role": "user", "content": INTENT_PROMPT.format(message=message)}
             ],
@@ -63,14 +70,15 @@ def detect_intent(message: str) -> str:
         raw = resp.choices[0].message.content.strip()
         data = json.loads(raw)
         return data.get("intent", "search_query")
-    except Exception:
+    except Exception as e:
+        print(f"[Intent Error] {e} | Raw: {raw}")
         return "search_query"
 
 
 def extract_search_query_from_alert(message: str) -> str:
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=INTENT_MODEL,
             messages=[
                 {"role": "user", "content": (
                     "Extract the product search query from this message for Amazon India search. "
@@ -86,7 +94,8 @@ def extract_search_query_from_alert(message: str) -> str:
             temperature=0,
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        print(f"[AlertQuery Error] {e}")
         return message
 
 
@@ -95,17 +104,19 @@ def simi_reply(first_name: str, history: list, user_message: str) -> str:
     messages = [
         {"role": "system", "content": SIMI_SYSTEM.format(first_name=first_name, today=today_str)}
     ]
-    for msg in history[-10:]:
+    valid_history = [m for m in history[-10:] if "role" in m and "content" in m]
+    for msg in valid_history:
         messages.append(msg)
     messages.append({"role": "user", "content": user_message})
 
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=CHAT_MODEL,
             messages=messages,
-            max_tokens=250,
+            max_tokens=300,
             temperature=0.7,
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        print(f"[Simi Error] {e}")
         return "Kuch technical issue aa gaya 😅 Thodi der baad try karo, Simi wapas aa jaayegi!"
