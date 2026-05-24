@@ -863,6 +863,49 @@ def main():
     async def post_init(application):
         start_scheduler(application.bot)
 
+        from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+
+        # Commands that ALL users see
+        user_commands = [
+            BotCommand("start",      "Bot shuru karo"),
+            BotCommand("help",       "Sari commands dekho"),
+            BotCommand("search",     "Product search karo"),
+            BotCommand("compare",    "2 products compare karo"),
+            BotCommand("track",      "Price alert lagao"),
+            BotCommand("myalerts",   "Mere active alerts dekho"),
+            BotCommand("mywishlist", "Meri wishlist dekho"),
+            BotCommand("simi",       "Simi shopping assistant"),
+            BotCommand("stop",       "Simi mode band karo"),
+        ]
+
+        # ALL commands — admin ke liye (user + admin commands)
+        admin_commands = user_commands + [
+            BotCommand("admin",     "📊 Full dashboard"),
+            BotCommand("users",     "👥 User count"),
+            BotCommand("clicks",    "🔗 Affiliate clicks"),
+            BotCommand("alerts",    "🔔 Alert stats"),
+            BotCommand("top",       "🏆 Top tracked products"),
+            BotCommand("recent",    "🕐 Last 10 joined users"),
+            BotCommand("ping",      "✅ Bot alive check"),
+            BotCommand("broadcast", "📢 Sabko message bhejo"),
+            BotCommand("backup",    "💾 DB snapshot"),
+        ]
+
+        # Set default commands for all users
+        await application.bot.set_my_commands(
+            user_commands,
+            scope=BotCommandScopeDefault(),
+        )
+
+        # Set full command list only for admin
+        try:
+            await application.bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=int(ADMIN_CHAT_ID)),
+            )
+        except Exception as e:
+            logger.warning("Could not set admin commands: %s", e)
+
     app.post_init = post_init
 
     logger.info("Shopping GPT Bot starting...")
