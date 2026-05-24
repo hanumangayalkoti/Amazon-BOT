@@ -690,9 +690,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         caption = format_detail_card(info)
         kb = detail_back_keyboard(asin)
+        image = info.get("image_url", "")
         try:
             if query.message.photo:
+                # Original card already has photo — just update caption + buttons
                 await query.edit_message_caption(caption, parse_mode="HTML", reply_markup=kb)
+            elif image:
+                # Original was text-only (search result had no image) — replace with photo
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_photo(
+                    photo=image, caption=caption,
+                    parse_mode="HTML", reply_markup=kb,
+                )
             else:
                 await query.edit_message_text(caption, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
