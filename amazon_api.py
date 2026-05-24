@@ -51,21 +51,24 @@ SEARCH_RESOURCES = [
     "offersV2.listings.availability",
     "offersV2.listings.dealDetails",
     "customerReviews.starRating",
+    "customerReviews.count",
 ]
 
 
 def resolve_url(url: str) -> str:
     try:
-        resp = requests.head(url, allow_redirects=True, timeout=10,
-                             headers={"User-Agent": "Mozilla/5.0"})
-        return resp.url
+        resp = requests.get(
+            url,
+            allow_redirects=True,
+            timeout=10,
+            stream=True,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        final_url = resp.url
+        resp.close()
+        return final_url
     except Exception:
-        try:
-            resp = requests.get(url, allow_redirects=True, timeout=10,
-                                headers={"User-Agent": "Mozilla/5.0"})
-            return resp.url
-        except Exception:
-            return url
+        return url
 
 
 def extract_asin(text: str) -> tuple:
