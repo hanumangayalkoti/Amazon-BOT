@@ -143,7 +143,8 @@ def _parse_item(item: dict, asin: str) -> dict:
         if vals:
             data["features"] = vals[:5]
 
-    img = item.get("images", {}).get("primary", {}).get("large", {})
+    img_primary = item.get("images", {}).get("primary", {})
+    img = img_primary.get("large") or img_primary.get("medium") or img_primary.get("small") or {}
     if img:
         data["image_url"] = img.get("url", "")
 
