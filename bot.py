@@ -84,49 +84,61 @@ def star_bar(rating: float) -> str:
     return "★" * full + "½" * half + "☆" * empty
 
 
+def _safe_cap(text: str, limit: int = 1020) -> str:
+    """Trim text to Telegram caption limit."""
+    return text[:limit - 1] + "…" if len(text) > limit else text
+
+
 def format_product_card(info: dict) -> str:
     lines = []
     if info.get("brand"):
-        lines.append(f"<b>Brand</b> — {info['brand']}")
+        lines.append(f"🏷 <b>Brand</b> — {info['brand']}")
     if info.get("title"):
         t = info["title"]
-        lines.append(f"<b>Product</b> — {t[:200] + '…' if len(t) > 200 else t}")
+        lines.append(f"📦 <b>Product</b> — {t[:160] + '…' if len(t) > 160 else t}")
     if info.get("category"):
-        lines.append(f"<b>Category</b> — {info['category']}")
+        lines.append(f"📂 <b>Category</b> — {info['category']}")
     lines.append("")
     if info.get("price"):
         lines.append(f"💰 <b>Price</b> — {info['price']}")
     else:
-        lines.append("⚠️ <b>Stock</b> — Currently Unavailable")
+        lines.append("⚠️ <b>Price</b> — Currently Unavailable")
     if info.get("discount_pct") and info.get("savings"):
-        lines.append(f"🔖 <b>Discount</b> — {info['discount_pct']}% off  (save {info['savings']})")
+        lines.append(f"🔖 <b>Discount</b> — {info['discount_pct']}% off (save {info['savings']})")
     elif info.get("discount_pct"):
         lines.append(f"🔖 <b>Discount</b> — {info['discount_pct']}% off")
     if info.get("availability") and info.get("price"):
         is_in = any(w in info["availability"].lower() for w in ["in stock", "available"])
         icon  = "✅" if is_in else "⚠️"
         lines.append(f"{icon} <b>Stock</b> — {info['availability']}")
-    if info.get("rating"):
-        stars = star_bar(float(info["rating"]))
-        lines.append(f"⭐ <b>Rating</b> — {stars} {info['rating']}/5")
-    if info.get("review_count"):
-        lines.append(f"💬 <b>Reviews</b> — {info['review_count']:,} ratings")
+    rating = info.get("rating")
+    if rating not in (None, "", 0, 0.0):
+        try:
+            stars = star_bar(float(rating))
+            lines.append(f"⭐ <b>Rating</b> — {stars} {rating}/5")
+        except (ValueError, TypeError):
+            pass
+    rc = info.get("review_count")
+    if rc:
+        lines.append(f"💬 <b>Reviews</b> — {rc:,}")
     return "\n".join(lines)
 
 
 def format_detail_card(info: dict) -> str:
-    """Full card with features — used in Details view."""
-    lines = [format_product_card(info)]
+    """Full card with key features — used in Details view (≤1020 chars)."""
+    base = format_product_card(info)
     features = info.get("features", [])
-    if features:
-        lines.append("\n📋 <b>Key Features:</b>")
-        for f in features[:4]:
-            lines.append(f"• {f[:180]}")
-    return "\n".join(lines)
+    if not features:
+        return _safe_cap(base)
+    feat_lines = ["\n📋 <b>Key Features:</b>"]
+    for f in features[:4]:
+        feat_lines.append(f"• {f[:150]}")
+    full = base + "\n".join(feat_lines)
+    return _safe_cap(full)
 
 
 async def _send_product_card(update_or_msg, context, info: dict, keyboard=None):
-    caption  = format_product_card(info)
+    caption  = _safe_cap(format_product_card(info))
     asin     = info.get("asin", "")
     kb       = keyboard or product_keyboard(asin)
     image    = info.get("image_url", "")
@@ -666,17 +678,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("detail_"):
         asin = data[7:]
-        info = cache.get(asin)
-        if not info:
-            try:
-                info = await asyncio.to_thread(api.get_product_info, asin)
-                if "product_cache" not in context.user_data:
-                    context.user_data["product_cache"] = {}
-                context.user_data["product_cache"][asin] = info
-            except Exception as e:
-                print(f"[Detail Error] asin={asin} {e}")
-                await query.answer("❌ Product info load nahi hui.", show_alert=True)
-                return
+        # Always fetch FULL product info — search cache has limited fields (no features/reviews)
+        try:
+            info = await asyncio.to_thread(api.get_product_info, asin)
+            if "product_cache" not in context.user_data:
+                context.user_data["product_cache"] = {}
+            context.user_data["product_cache"][asin] = info
+        except Exception as e:
+            print(f"[Detail Error] asin={asin} {e}")
+            await query.answer("❌ Product info load nahi hui. Retry karo.", show_alert=True)
+            return
         caption = format_detail_card(info)
         kb = detail_back_keyboard(asin)
         try:
@@ -685,8 +696,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text(caption, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
-            print(f"[Detail Edit Error] {e}")
-            await query.answer("❌ Edit nahi ho saka.", show_alert=True)
+            err = str(e)
+            if "not modified" not in err.lower():
+                print(f"[Detail Edit Error] {err}")
+                await query.answer("❌ Edit nahi ho saka.", show_alert=True)
 
     elif data.startswith("back_"):
         asin = data[5:]
@@ -697,7 +710,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 await query.answer("❌ Product info nahi mili.", show_alert=True)
                 return
-        caption = format_product_card(info)
+        caption = _safe_cap(format_product_card(info))
         kb = search_result_keyboard(asin)
         try:
             if query.message.photo:
@@ -705,8 +718,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text(caption, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
-            print(f"[Back Edit Error] {e}")
-            await query.answer("❌ Wapas nahi ja saka.", show_alert=True)
+            err = str(e)
+            if "not modified" not in err.lower():
+                print(f"[Back Edit Error] {err}")
+                await query.answer("❌ Wapas nahi ja saka.", show_alert=True)
 
     elif data.startswith("features_"):
         asin = data[9:]
