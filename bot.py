@@ -564,12 +564,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if simi_active:
         detected_intent = await asyncio.to_thread(ai.detect_intent, text)
         if detected_intent == "product_link":
-            pass
+            pass  # falls through to normal product card flow below
         elif detected_intent == "alert_request":
             query = await asyncio.to_thread(ai.extract_search_query_from_alert, text)
             await _do_search(update.message, context, query, with_alert_note=True)
             return
+        elif detected_intent == "search_query":
+            # User wants to search a product — do real Amazon search, not Simi chat
+            await _do_search(update.message, context, text)
+            return
         else:
+            # "simi" or "off_topic" — let Simi handle via chat
             if "simi_history" not in context.user_data:
                 context.user_data["simi_history"] = []
             history = context.user_data["simi_history"]
@@ -578,7 +583,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "user",      "content": text})
             history.append({"role": "assistant", "content": reply})
             context.user_data["simi_history"] = history[-20:]
-            footer = "\n\n— Simi 🤖  |  /search karo ya seedha query type karo"
+            footer = "\n\n— Simi 🤖  |  /stop se bahar jao"
             await update.message.reply_text(reply + footer)
             return
 
@@ -626,7 +631,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif intent == "search_query":
         await _do_search(update.message, context, text)
 
-    elif intent in ("support", "off_topic"):
+    elif intent in ("simi", "off_topic"):
         context.user_data["simi_active"] = True
         if "simi_history" not in context.user_data:
             context.user_data["simi_history"] = []
