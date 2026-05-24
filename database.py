@@ -274,13 +274,13 @@ def get_top_asins(limit=5):
             return cur.fetchall()
 
 
-  def get_recent_users(limit=10):
-      with get_conn() as conn:
-          with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-              cur.execute(
-                  "SELECT user_id, username, first_name, last_name, joined_at "
-                  "FROM users ORDER BY joined_at DESC LIMIT %s",
-                  (limit,)
-              )
-              return cur.fetchall()
-  
+
+def get_recent_users(limit=10):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT user_id, username, first_name, last_name, joined_at "
+                "FROM users ORDER BY joined_at DESC LIMIT %s",
+                (limit,)
+            )
+            return cur.fetchall()
