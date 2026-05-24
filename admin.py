@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -13,6 +14,38 @@ ADMIN_CHAT_ID = os.environ["ADMIN_CHAT_ID"]
 
 def is_admin(update: Update) -> bool:
     return str(update.effective_user.id) == ADMIN_CHAT_ID
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    stats = await asyncio.to_thread(db.get_stats)
+    top   = await asyncio.to_thread(db.get_top_asins, 3)
+    now   = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+    top_lines = ""
+    for i, (asin, title, cnt) in enumerate(top, 1):
+        top_lines += f"\n  {i}. {(title or asin)[:35]} ({cnt} alerts)"
+
+    await update.message.reply_text(
+        f"🛠 <b>Admin Dashboard</b>\n"
+        f"<i>{now} IST</i>\n\n"
+        f"👥 <b>Users</b>\n"
+        f"  • Total:      {stats['total_users']:,}\n"
+        f"  • This month: {stats['month_users']:,}\n"
+        f"  • Today:      {stats['today_users']:,}\n\n"
+        f"🔗 <b>Affiliate Clicks</b>\n"
+        f"  • Total:      {stats['total_clicks']:,}\n"
+        f"  • This month: {stats['month_clicks']:,}\n"
+        f"  • Today:      {stats['today_clicks']:,}\n\n"
+        f"🔔 <b>Price Alerts</b>\n"
+        f"  • Active:     {stats['total_alerts']:,}\n"
+        f"  • Tracking:   {stats['users_tracking']:,} users\n\n"
+        f"🏆 <b>Top Tracked Products</b>"
+        f"{top_lines if top_lines else chr(10) + '  None yet'}\n\n"
+        f"<b>Commands:</b> /users /clicks /alerts /top /recent /broadcast /backup /ping",
+        parse_mode="HTML",
+    )
 
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -28,7 +61,7 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
@@ -39,6 +72,10 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Today:      <b>{stats['today_clicks']:,}</b>",
         parse_mode="HTML",
     )
+
+
+async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_clicks(update, context)
 
 
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,6 +102,34 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         short = (title or asin)[:50]
         lines.append(f"{i}. {short}\n   ASIN: <code>{asin}</code>  |  {cnt} alerts")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    rows = await asyncio.to_thread(db.get_recent_users, 10)
+    if not rows:
+        await update.message.reply_text("Abhi koi users nahi hain.")
+        return
+    lines = ["👥 <b>Last 10 Joined Users</b>\n"]
+    for r in rows:
+        name  = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
+        uname = f"@{r['username']}" if r.get("username") else "No username"
+        joined = r["joined_at"].strftime("%d %b, %I:%M %p") if r.get("joined_at") else "?"
+        lines.append(f"• {name} ({uname})\n  ID: <code>{r['user_id']}</code>  |  {joined}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    now = datetime.now().strftime("%d %b %Y, %I:%M:%S %p")
+    await update.message.reply_text(
+        f"✅ <b>Bot is LIVE</b>\n\n"
+        f"🕐 Server time: {now} IST\n"
+        f"🤖 @Shopping_GPT_Bot — Running normally",
+        parse_mode="HTML",
+    )
 
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,11 +177,15 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     stats  = await asyncio.to_thread(db.get_stats)
     top    = await asyncio.to_thread(db.get_top_asins, 5)
+    now    = datetime.now().strftime("%d %b %Y, %I:%M %p")
     lines  = [
-        "📊 <b>DB Snapshot</b>\n",
+        f"📊 <b>DB Snapshot</b>  —  <i>{now}</i>\n",
         f"Users:         {stats['total_users']:,}",
+        f"Month users:   {stats['month_users']:,}",
+        f"Today users:   {stats['today_users']:,}",
         f"Alerts active: {stats['total_alerts']:,}",
         f"Total clicks:  {stats['total_clicks']:,}",
+        f"Month clicks:  {stats['month_clicks']:,}",
         "",
         "🏆 <b>Top Tracked:</b>",
     ]
