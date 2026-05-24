@@ -163,24 +163,28 @@ async def _send_product_card(update_or_msg, context, info: dict, keyboard=None):
         )
 
 
-async def _notify_admin(context, user, total_users: int):
-    try:
-        name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-        uname = f"@{user.username}" if user.username else "No username"
-        now   = datetime.now().strftime("%d %b %Y, %I:%M %p")
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=(
-                f"👤 <b>New User!</b>\n\n"
-                f"Name: {name}\nUsername: {uname}\n"
-                f"User ID: <code>{user.id}</code>\nTime: {now} IST\n\n"
-                f"Total Users: <b>{total_users:,}</b>"
-            ),
-            parse_mode="HTML",
-            disable_notification=True,
-        )
-    except Exception:
-        pass
+async def _notify_admin(context, user, total_users: int, is_new: bool = True):
+      try:
+          name  = f"{user.first_name or ''} {user.last_name or ''}".strip() or "No Name"
+          uname = f"@{user.username}" if user.username else "No username"
+          now_date = datetime.now().strftime("%d %b %Y")
+          now_time = datetime.now().strftime("%I:%M %p")
+          header = "🆕 <b>New User!</b>" if is_new else "🔄 <b>Returning User</b>"
+          await context.bot.send_message(
+              chat_id=ADMIN_CHAT_ID,
+              text=(
+                  f"{header}\n\n"
+                  f"Hi ADMIN — {uname} ne @Shopping_GPT_Bot ko start kiya he\n\n"
+                  f"👤 Name: {name}\n"
+                  f"🆔 User ID: <code>{user.id}</code>\n"
+                  f"📅 Date: {now_date}\n"
+                  f"🕐 Time: {now_time} IST\n\n"
+                  f"👥 Total Users: <b>{total_users:,}</b>"
+              ),
+              parse_mode="HTML",
+          )
+      except Exception:
+          pass
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,7 +193,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       user.first_name, user.last_name)
     total   = await asyncio.to_thread(db.get_user_count)
     if is_new:
-        await _notify_admin(context, user, total)
+        await _notify_admin(context, user, total, is_new=True)
 
     await update.message.reply_text(
         f"Namaste <b>{user.first_name}!</b> 🛍️\n\n"
@@ -838,13 +842,18 @@ def main():
     app.add_handler(CommandHandler("track",      cmd_track))
     app.add_handler(CommandHandler("myalerts",   cmd_myalerts))
     app.add_handler(CommandHandler("mywishlist", cmd_mywishlist))
-    app.add_handler(CommandHandler("simi",    cmd_simi))
+    app.add_handler(CommandHandler("simi",       cmd_simi))
     app.add_handler(CommandHandler("stop",       cmd_stop))
 
+    # Admin-only commands (sirf aapko dikhenge)
+    app.add_handler(CommandHandler("admin",      adm.cmd_admin))
     app.add_handler(CommandHandler("users",      adm.cmd_users))
+    app.add_handler(CommandHandler("clicks",     adm.cmd_clicks))
     app.add_handler(CommandHandler("links",      adm.cmd_links))
     app.add_handler(CommandHandler("alerts",     adm.cmd_alerts))
     app.add_handler(CommandHandler("top",        adm.cmd_top))
+    app.add_handler(CommandHandler("recent",     adm.cmd_recent))
+    app.add_handler(CommandHandler("ping",       adm.cmd_ping))
     app.add_handler(CommandHandler("broadcast",  adm.cmd_broadcast))
     app.add_handler(CommandHandler("backup",     adm.cmd_backup))
 
