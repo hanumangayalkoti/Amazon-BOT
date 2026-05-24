@@ -325,7 +325,7 @@ async def cmd_mywishlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.1)
 
 
-async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_simi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["simi_active"] = True
     context.user_data["waiting_for_search"] = False
     context.user_data["waiting_for_track"]  = False
@@ -833,7 +833,7 @@ def main():
     app.add_handler(CommandHandler("track",      cmd_track))
     app.add_handler(CommandHandler("myalerts",   cmd_myalerts))
     app.add_handler(CommandHandler("mywishlist", cmd_mywishlist))
-    app.add_handler(CommandHandler("support",    cmd_support))
+    app.add_handler(CommandHandler("simi",    cmd_simi))
     app.add_handler(CommandHandler("stop",       cmd_stop))
 
     app.add_handler(CommandHandler("users",      adm.cmd_users))
