@@ -6,7 +6,8 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    ssl = os.environ.get("DB_SSLMODE", "require")
+    return psycopg2.connect(DATABASE_URL, sslmode=ssl)
 
 
 def init_db():
@@ -178,9 +179,9 @@ def get_price_history(asin, days=7):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT price, checked_at FROM price_history
-                WHERE asin = %s AND checked_at > NOW() - INTERVAL '%(d)s days'
+                WHERE asin = %s AND checked_at > NOW() - INTERVAL '%s days'
                 ORDER BY checked_at DESC LIMIT 14
-            """, {"asin": asin, "d": days})
+            """, (asin, days))
             return cur.fetchall()
 
 
