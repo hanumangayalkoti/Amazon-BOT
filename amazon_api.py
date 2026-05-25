@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import threading
 import requests
 
 CREDENTIAL_ID      = os.environ["CREDENTIAL_ID"]
@@ -26,7 +27,12 @@ SEARCH_ENDPOINT = f"{API_BASE}/catalog/v1/searchItems"
 
 ASIN_PATTERN = re.compile(r"/(?:dp|gp/product|exec/obidos/ASIN|o/ASIN)/([A-Z0-9]{10})")
 
+# B2 — token cache with thread lock to prevent race conditions
 _token_cache: dict = {"token": None, "expires_at": 0}
+_token_lock  = threading.Lock()
+
+# B8 — cache resolved short URLs so we never hit Amazon twice for the same link
+_url_cache: dict[str, str] = {}
 
 PRODUCT_RESOURCES = [
     "images.primary.large",
@@ -55,17 +61,25 @@ SEARCH_RESOURCES = [
 ]
 
 
+# B8 — cached URL resolution with better headers
 def resolve_url(url: str) -> str:
+    if url in _url_cache:
+        return _url_cache[url]
     try:
         resp = requests.get(
             url,
             allow_redirects=True,
             timeout=10,
             stream=True,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-IN,en;q=0.9",
+            },
         )
         final_url = resp.url
         resp.close()
+        _url_cache[url] = final_url
         return final_url
     except Exception:
         return url
@@ -99,26 +113,33 @@ def build_affiliate_link(asin: str) -> str:
     return f"https://www.amazon.in/dp/{asin}?tag={tag}"
 
 
+# B2 — double-checked locking pattern prevents token refresh race condition
 def _get_token() -> str:
     now = time.time()
+    # Fast path — no lock needed if token is valid
     if _token_cache["token"] and now < _token_cache["expires_at"]:
         return _token_cache["token"]
 
-    token_url = VERSION_TOKEN_URLS.get(CREDENTIAL_VERSION)
-    if not token_url:
-        raise RuntimeError(f"Unsupported CREDENTIAL_VERSION: {CREDENTIAL_VERSION}")
+    with _token_lock:
+        # Re-check inside lock — another thread may have refreshed it already
+        if _token_cache["token"] and time.time() < _token_cache["expires_at"]:
+            return _token_cache["token"]
 
-    resp = requests.post(
-        token_url,
-        data={"grant_type": "client_credentials", "scope": SCOPE},
-        auth=(CREDENTIAL_ID, CREDENTIAL_SECRET),
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    _token_cache["token"] = data["access_token"]
-    _token_cache["expires_at"] = now + data.get("expires_in", 3600) - 60
-    return _token_cache["token"]
+        token_url = VERSION_TOKEN_URLS.get(CREDENTIAL_VERSION)
+        if not token_url:
+            raise RuntimeError(f"Unsupported CREDENTIAL_VERSION: {CREDENTIAL_VERSION}")
+
+        resp = requests.post(
+            token_url,
+            data={"grant_type": "client_credentials", "scope": SCOPE},
+            auth=(CREDENTIAL_ID, CREDENTIAL_SECRET),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _token_cache["token"]      = data["access_token"]
+        _token_cache["expires_at"] = time.time() + data.get("expires_in", 3600) - 60
+        return _token_cache["token"]
 
 
 def _parse_item(item: dict, asin: str) -> dict:
@@ -150,13 +171,13 @@ def _parse_item(item: dict, asin: str) -> dict:
 
     listings = item.get("offersV2", {}).get("listings", [])
     if listings:
-        listing = listings[0]
+        listing  = listings[0]
         price_obj = listing.get("price", {})
-        money = price_obj.get("money", {})
+        money     = price_obj.get("money", {})
         if money:
-            data["price"] = money.get("displayAmount", "")
+            data["price"]        = money.get("displayAmount", "")
             data["price_amount"] = float(money.get("amount", 0))
-        savings = price_obj.get("savings", {})
+        savings   = price_obj.get("savings", {})
         sav_money = savings.get("money", {})
         if sav_money:
             data["savings"] = sav_money.get("displayAmount", "")
@@ -167,7 +188,7 @@ def _parse_item(item: dict, asin: str) -> dict:
         if avail:
             data["availability"] = avail.get("message", "")
 
-    cr = item.get("customerReviews", {})
+    cr   = item.get("customerReviews", {})
     if cr.get("count") is not None:
         data["review_count"] = cr["count"]
     star = cr.get("starRating", {})
@@ -179,11 +200,11 @@ def _parse_item(item: dict, asin: str) -> dict:
 
 
 def get_product_info(asin: str) -> dict:
-    token = _get_token()
+    token   = _get_token()
     payload = {
         "partnerTag": PARTNER_TAG,
-        "itemIds": [asin],
-        "resources": PRODUCT_RESOURCES,
+        "itemIds":    [asin],
+        "resources":  PRODUCT_RESOURCES,
     }
     try:
         resp = requests.post(
@@ -192,7 +213,7 @@ def get_product_info(asin: str) -> dict:
             headers={
                 "Authorization": f"Bearer {token}",
                 "x-marketplace": MARKETPLACE,
-                "Content-Type": "application/json",
+                "Content-Type":  "application/json",
             },
             timeout=20,
         )
@@ -218,13 +239,13 @@ def get_product_info(asin: str) -> dict:
 
 
 def search_items(query: str, count: int = 5) -> list:
-    token = _get_token()
+    token   = _get_token()
     payload = {
-        "partnerTag": PARTNER_TAG,
-        "keywords": query,
+        "partnerTag":  PARTNER_TAG,
+        "keywords":    query,
         "searchIndex": "All",
-        "itemCount": count,
-        "resources": SEARCH_RESOURCES,
+        "itemCount":   count,
+        "resources":   SEARCH_RESOURCES,
     }
     try:
         resp = requests.post(
@@ -233,7 +254,7 @@ def search_items(query: str, count: int = 5) -> list:
             headers={
                 "Authorization": f"Bearer {token}",
                 "x-marketplace": MARKETPLACE,
-                "Content-Type": "application/json",
+                "Content-Type":  "application/json",
             },
             timeout=20,
         )
@@ -245,9 +266,8 @@ def search_items(query: str, count: int = 5) -> list:
     if resp.status_code not in (200, 206):
         raise RuntimeError(f"Amazon search error: {resp.status_code}")
 
-    body  = resp.json()
-    items = body.get("searchResult", {}).get("items", [])
-
+    body    = resp.json()
+    items   = body.get("searchResult", {}).get("items", [])
     results = []
     for item in items:
         asin = item.get("asin", "")
