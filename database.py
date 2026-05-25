@@ -1,16 +1,44 @@
 import os
 import psycopg2
+import psycopg2.pool
 import psycopg2.extras
+from contextlib import contextmanager
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
+# B1 — ThreadedConnectionPool replaces per-call connections
+_pool: psycopg2.pool.ThreadedConnectionPool | None = None
 
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        ssl   = os.environ.get("DB_SSLMODE", "require")
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=2,
+            maxconn=10,
+            dsn=DATABASE_URL,
+            sslmode=ssl,
+        )
+    return _pool
+
+
+@contextmanager
 def get_conn():
-    ssl = os.environ.get("DB_SSLMODE", "require")
-    return psycopg2.connect(DATABASE_URL, sslmode=ssl)
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
 
 
 def init_db():
+    _get_pool()  # warm up pool on startup
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -35,6 +63,11 @@ def init_db():
                     created_at      TIMESTAMP DEFAULT NOW(),
                     UNIQUE(user_id, asin)
                 )
+            """)
+            # B7 — notified flag to track whether alert has fired
+            cur.execute("""
+                ALTER TABLE price_alerts
+                ADD COLUMN IF NOT EXISTS notified BOOLEAN DEFAULT FALSE
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS price_history (
@@ -69,7 +102,10 @@ def init_db():
                     UNIQUE(user_id, asin)
                 )
             """)
-        conn.commit()
+            # Section C — performance indexes
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user ON price_alerts(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_wishlist_user ON wishlist(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_clicks_user ON link_clicks(user_id)")
 
 
 def upsert_user(user_id, username, first_name, last_name):
@@ -86,7 +122,6 @@ def upsert_user(user_id, username, first_name, last_name):
                 RETURNING (xmax = 0) AS is_new
             """, (user_id, username, first_name, last_name))
             row = cur.fetchone()
-        conn.commit()
     return row[0] if row else False
 
 
@@ -97,11 +132,27 @@ def get_user_count():
             return cur.fetchone()[0]
 
 
+# A6 — alias used by broadcast helpers
+get_user_count_total = get_user_count
+
+
 def get_all_user_ids():
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM users")
             return [r[0] for r in cur.fetchall()]
+
+
+# A6 — paginated user list for broadcast select-user flow
+def get_users_paginated(offset: int = 0, limit: int = 10):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT user_id, username, first_name FROM users "
+                "ORDER BY joined_at DESC LIMIT %s OFFSET %s",
+                (limit, offset)
+            )
+            return cur.fetchall()
 
 
 def add_price_alert(user_id, asin, product_title, current_price, affiliate_link):
@@ -115,9 +166,9 @@ def add_price_alert(user_id, asin, product_title, current_price, affiliate_link)
                     tracked_price  = EXCLUDED.tracked_price,
                     current_price  = EXCLUDED.current_price,
                     product_title  = EXCLUDED.product_title,
-                    affiliate_link = EXCLUDED.affiliate_link
+                    affiliate_link = EXCLUDED.affiliate_link,
+                    notified       = FALSE
             """, (user_id, asin, product_title, current_price, current_price, affiliate_link))
-        conn.commit()
 
 
 def get_user_alerts(user_id):
@@ -137,7 +188,6 @@ def remove_alert(alert_id, user_id):
                 "DELETE FROM price_alerts WHERE id = %s AND user_id = %s",
                 (alert_id, user_id)
             )
-        conn.commit()
 
 
 def get_all_tracked_asins():
@@ -155,13 +205,24 @@ def get_alerts_for_asin(asin):
 
 
 def update_alert_price(alert_id, new_price):
+    # B7 — update BOTH current_price AND tracked_price so the alert only fires
+    # on FURTHER drops below the new level, not the same price again
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE price_alerts SET current_price = %s WHERE id = %s",
-                (new_price, alert_id)
+                "UPDATE price_alerts SET current_price = %s, tracked_price = %s WHERE id = %s",
+                (new_price, new_price, alert_id)
             )
-        conn.commit()
+
+
+# B7 — mark alert as notified (optional suppress duplicate same-price alerts)
+def mark_alert_notified(alert_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE price_alerts SET notified = TRUE WHERE id = %s",
+                (alert_id,)
+            )
 
 
 def save_price_snapshot(asin, price):
@@ -171,15 +232,16 @@ def save_price_snapshot(asin, price):
                 "INSERT INTO price_history (asin, price) VALUES (%s, %s)",
                 (asin, price)
             )
-        conn.commit()
 
 
+# B3 — SQL injection fix: use interval multiplication, not string substitution
 def get_price_history(asin, days=7):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT price, checked_at FROM price_history
-                WHERE asin = %s AND checked_at > NOW() - INTERVAL '%s days'
+                WHERE asin = %s
+                  AND checked_at > NOW() - (%s * INTERVAL '1 day')
                 ORDER BY checked_at DESC LIMIT 14
             """, (asin, days))
             return cur.fetchall()
@@ -192,7 +254,6 @@ def log_click(user_id, asin):
                 "INSERT INTO link_clicks (user_id, asin) VALUES (%s, %s)",
                 (user_id, asin)
             )
-        conn.commit()
 
 
 def add_to_wishlist(user_id, asin, product_title, price, image_url, affiliate_link):
@@ -206,7 +267,6 @@ def add_to_wishlist(user_id, asin, product_title, price, image_url, affiliate_li
                 RETURNING id
             """, (user_id, asin, product_title, price, image_url, affiliate_link))
             row = cur.fetchone()
-        conn.commit()
     return row is not None
 
 
@@ -227,7 +287,6 @@ def remove_from_wishlist(item_id, user_id):
                 "DELETE FROM wishlist WHERE id = %s AND user_id = %s",
                 (item_id, user_id)
             )
-        conn.commit()
 
 
 def get_stats():
@@ -250,13 +309,13 @@ def get_stats():
             cur.execute("SELECT COUNT(DISTINCT user_id) FROM price_alerts")
             users_tracking = cur.fetchone()[0]
     return {
-        "total_users": total_users,
-        "month_users": month_users,
-        "today_users": today_users,
-        "total_clicks": total_clicks,
-        "month_clicks": month_clicks,
-        "today_clicks": today_clicks,
-        "total_alerts": total_alerts,
+        "total_users":    total_users,
+        "month_users":    month_users,
+        "today_users":    today_users,
+        "total_clicks":   total_clicks,
+        "month_clicks":   month_clicks,
+        "today_clicks":   today_clicks,
+        "total_alerts":   total_alerts,
         "users_tracking": users_tracking,
     }
 
@@ -272,7 +331,6 @@ def get_top_asins(limit=5):
                 LIMIT %s
             """, (limit,))
             return cur.fetchall()
-
 
 
 def get_recent_users(limit=10):
