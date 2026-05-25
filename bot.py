@@ -323,17 +323,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _notify_admin(context, user, total, is_new=True)
 
     await update.message.reply_text(
-        f"Hi <b>{user.first_name}!</b> 🛍️\n\n"
-        "Main hoon <b>Shopping GPT</b> — aapka personal Amazon assistant!\n\n"
+        f"Namaste <b>{user.first_name}!</b> 🛍️\n\n"
+        "Main hoon <b>Shopping GPT</b> — tera personal Amazon India assistant!\n\n"
         "✨ Yeh sab kar sakta hoon:\n"
-        "• 🔎 Amazon link ya ASIN bhejo → complete product details pao\n"
-        "• ⌨️<b>'best headphones under 2000'</b> type karo → top 5 results pao\n"
-        "• 💰 Live price, discount, rating, Reviews aur offers check karo\n"
-        "• 🎯 Hidden deals & best discounts discover karo\n"
-        "• 🔔 Price Drop Alert lagao — price gire toh instant notification\n"
+        "• Amazon link ya ASIN bhejo → product card\n"
+        "• <b>'best headphones under 2000'</b> type karo → 5 results\n"
+        "• 🔔 Price alert set karo — price gire toh notify\n"
         "• ⚖️ /compare — 2 products compare karo\n"
         "• 💾 Wishlist mein save karo\n"
-        "• 🤖 AI se discuss karo <b>'best earbuds under 2000'</b> /simi — \n\n"
+        "• 🤖 /simi — Simi se shopping advice lo\n\n"
         "Seedha link bhejo ya kuch bolo — shuru karte hain! 👇",
         parse_mode="HTML",
     )
