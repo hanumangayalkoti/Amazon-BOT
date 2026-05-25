@@ -2,7 +2,7 @@
 
 A professional, public-facing Amazon India Affiliate Telegram Bot that lets users send any Amazon link, ASIN, or natural language query and returns clean product info with inline buttons, price alerts, wishlist, compare, and an AI assistant named Simi.
 
-**Affiliate Tag:** `dealskoti-21`
+**Affiliate Tag:** `shoppinggpt-21`
 **Marketplace:** `www.amazon.in`
 **Deployment:** Railway (auto-deploy from GitHub push)
 
