@@ -18,7 +18,7 @@ async def check_prices(bot):
 
     for asin in asins:
         try:
-            info = await asyncio.to_thread(api.get_product_info, asin)
+            info      = await asyncio.to_thread(api.get_product_info, asin)
             new_price = info.get("price_amount")
 
             if new_price:
@@ -27,12 +27,14 @@ async def check_prices(bot):
             alerts = await asyncio.to_thread(db.get_alerts_for_asin, asin)
 
             for alert in alerts:
+                # B7 — compare against tracked_price (which is updated after each alert fires)
+                # This means the alert fires only on FURTHER drops, never the same level twice
                 tracked = alert["tracked_price"]
                 if new_price and new_price < tracked:
-                    save = round(tracked - new_price, 2)
-                    title = alert["product_title"] or info.get("title", "Product")
+                    save       = round(tracked - new_price, 2)
+                    title      = alert["product_title"] or info.get("title", "Product")
                     title_short = title[:60] + "…" if len(title) > 60 else title
-                    link = alert["affiliate_link"] or api.build_affiliate_link(asin)
+                    link       = alert["affiliate_link"] or api.build_affiliate_link(asin)
 
                     text = (
                         f"🔔 <b>Price Drop Alert!</b>\n\n"
@@ -52,6 +54,8 @@ async def check_prices(bot):
                     except Exception as e:
                         logger.warning("Could not notify user %s: %s", alert["user_id"], e)
 
+                    # B7 — update tracked_price = new_price so next alert fires
+                    # only if price drops FURTHER below this new level
                     await asyncio.to_thread(db.update_alert_price, alert["id"], new_price)
 
             await asyncio.sleep(0.5)
@@ -74,4 +78,4 @@ def start_scheduler(bot):
     )
     scheduler.start()
     logger.info("Scheduler started — price check every 6 hours")
-    return scheduler
+    return scheduler  # B6 — caller must store this reference to prevent GC
