@@ -594,37 +594,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # A4/A5 — detect if user wants to switch away from current active mode
-    active_mode = _get_active_mode_name(context)
-    if active_mode:
-        # Amazon link → always show product card regardless of mode
-        _early_asin_check, _ = api.extract_asin(text)
-        if not _early_asin_check:
-            intent_check = await asyncio.to_thread(ai.detect_intent, text)
-            # Switch mode if user is clearly trying to search/track/use a different flow
-            switch_triggers = ("search_query", "alert_request")
-            simi_modes      = ("🤖 Simi",)
-            should_switch   = (
-                intent_check in switch_triggers
-                and active_mode not in ("🔍 Search", "🔔 Track", "🤖 Simi")
-            ) or (
-                # In compare/track mode, search queries or alert requests mean user moved on
-                active_mode in ("⚖️ Compare", "🔔 Track", "🔍 Search")
-                and intent_check in ("simi", "off_topic", "search_query", "alert_request")
-                and not _early_asin_check
-                # Only switch if it looks like a definitive new intent, not a typo/error
-                and len(text) > 8
-            )
-            if should_switch:
-                _clear_all_active_modes(context)
-                await update.message.reply_text(
-                    f"✅ <b>{active_mode} mode band ho gaya!</b>\n"
-                    "Processing tera naya request... 👇",
-                    parse_mode="HTML",
-                )
-                # fall through to process new intent below
-
-    # Re-read mode flags (may have been cleared above)
+    # Read current mode flags
     compare_step   = context.user_data.get("compare_step")
     waiting_search = context.user_data.get("waiting_for_search")
     waiting_track  = context.user_data.get("waiting_for_track")
@@ -650,30 +620,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if not asin:
+            # A4 — intent escape: if user clearly wants to do something else, cancel compare
+            detected = await asyncio.to_thread(ai.detect_intent, text)
+            if detected in ("search_query", "alert_request", "simi", "off_topic"):
+                context.user_data.pop("compare_step",       None)
+                context.user_data.pop("compare_asin1",      None)
+                context.user_data.pop("compare_info1",      None)
+                context.user_data.pop("compare_started_at", None)
+                compare_step = None
+                await update.message.reply_text(
+                    "⚠️ <b>Compare cancel ho gaya!</b>\n\nTune kuch aur likha — ab woh process karta hoon 😊",
+                    parse_mode="HTML",
+                )
+                # Fall through — compare_step is None, new intent will be handled below
+            else:
+                await update.message.reply_text(
+                    "❌ Valid Amazon link ya ASIN nahi mila.\n"
+                    "Example: https://www.amazon.in/dp/B0XXXXXX ya B0XXXXXX\n\n"
+                    "<i>/stop se compare cancel karo</i>",
+                    parse_mode="HTML",
+                )
+                return
+        if asin:  # only continue compare flow when we actually have a valid ASIN
+            wait = await update.message.reply_text("⏳ Pehla product fetch ho raha hai...")
+            try:
+                info1 = await asyncio.to_thread(api.get_product_info, asin)
+            except Exception:
+                await wait.edit_text("❌ Product nahi mila — ek baar link check karo.")
+                return
+            await wait.delete()
+            context.user_data["compare_step"]       = 2
+            context.user_data["compare_started_at"] = datetime.now(IST).timestamp()  # B9 reset
+            context.user_data["compare_asin1"]      = asin
+            context.user_data["compare_info1"]      = info1
+            t = info1.get("title", asin)[:60]
             await update.message.reply_text(
-                "❌ Valid Amazon link ya ASIN nahi mila.\n"
-                "Example: https://www.amazon.in/dp/B0XXXXXX ya B0XXXXXX\n\n"
-                "<i>/stop se compare cancel karo</i>",
+                f"✅ <b>{t}...</b> mil gaya!\n\nAb doosre product ka link bhejo 👇",
                 parse_mode="HTML",
             )
             return
-        wait = await update.message.reply_text("⏳ Pehla product fetch ho raha hai...")
-        try:
-            info1 = await asyncio.to_thread(api.get_product_info, asin)
-        except Exception:
-            await wait.edit_text("❌ Product nahi mila — ek baar link check karo.")
-            return
-        await wait.delete()
-        context.user_data["compare_step"]       = 2
-        context.user_data["compare_started_at"] = datetime.now(IST).timestamp()  # B9 reset
-        context.user_data["compare_asin1"]      = asin
-        context.user_data["compare_info1"]      = info1
-        t = info1.get("title", asin)[:60]
-        await update.message.reply_text(
-            f"✅ <b>{t}...</b> mil gaya!\n\nAb doosre product ka link bhejo 👇",
-            parse_mode="HTML",
-        )
-        return
+        # else: A4 escape — compare_step is None, fall through to handle new intent
 
     if compare_step == 2:
         asin, error = api.extract_asin(text)
@@ -766,7 +752,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query = await asyncio.to_thread(ai.extract_search_query_from_alert, text)
             await _do_search(update.message, context, query, with_alert_note=True)
             return
-        elif detected_intent == "search_query":
+        elif detected_intent == "search_query" and len(text.split()) >= 4:
+            # Only do Amazon search for multi-word product queries (4+ words)
+            # Short messages like "He simi", "Hi", "Hello" → Simi chat, not search
             await _do_search(update.message, context, text)
             return
         else:
@@ -1102,8 +1090,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = [f"📈 <b>Price History — {title}</b>\n"]
         for row in rows:
-            # A1 — show time in IST
-            dt_ist = row["checked_at"].astimezone(IST)
+            # A1 — convert DB naive UTC timestamp to IST safely
+            checked = row["checked_at"]
+            if checked.tzinfo is None:
+                checked = checked.replace(tzinfo=timezone.utc)
+            dt_ist = checked.astimezone(IST)
             date   = dt_ist.strftime("%d %b, %I:%M %p")
             lines.append(f"• {date} IST — ₹{row['price']:,.0f}")
         await query.message.reply_text("\n".join(lines), parse_mode="HTML")
