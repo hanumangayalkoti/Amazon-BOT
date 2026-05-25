@@ -126,7 +126,14 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in rows:
         name   = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
         uname  = f"@{r['username']}" if r.get("username") else "No username"
-        joined = r["joined_at"].strftime("%d %b, %I:%M %p") if r.get("joined_at") else "?"
+        # FIX-15: Convert UTC timestamp from DB to IST before formatting
+        raw_ts = r.get("joined_at")
+        if raw_ts:
+            if raw_ts.tzinfo is None:
+                raw_ts = raw_ts.replace(tzinfo=timezone.utc)
+            joined = raw_ts.astimezone(IST).strftime("%d %b, %I:%M %p IST")
+        else:
+            joined = "?"
         lines.append(f"• {name} ({uname})\n  ID: <code>{r['user_id']}</code>  |  {joined}")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
