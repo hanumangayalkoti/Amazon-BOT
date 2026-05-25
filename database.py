@@ -1,25 +1,33 @@
 import os
+import threading
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
 from contextlib import contextmanager
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+# FIX-1: Graceful error on missing env var instead of cryptic KeyError
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit("FATAL: DATABASE_URL environment variable is not set.")
 
 # B1 — ThreadedConnectionPool replaces per-call connections
 _pool: psycopg2.pool.ThreadedConnectionPool | None = None
+# FIX-9: Thread lock for pool initialization prevents race condition on startup
+_pool_lock = threading.Lock()
 
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None:
-        ssl   = os.environ.get("DB_SSLMODE", "require")
-        _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
-            dsn=DATABASE_URL,
-            sslmode=ssl,
-        )
+        with _pool_lock:
+            if _pool is None:  # double-checked locking
+                ssl   = os.environ.get("DB_SSLMODE", "require")
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=2,
+                    maxconn=10,
+                    dsn=DATABASE_URL,
+                    sslmode=ssl,
+                )
     return _pool
 
 
