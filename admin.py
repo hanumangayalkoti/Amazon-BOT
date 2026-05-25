@@ -1,27 +1,38 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import database as db
 
-logger = logging.getLogger(__name__)
+logger        = logging.getLogger(__name__)
 ADMIN_CHAT_ID = os.environ["ADMIN_CHAT_ID"]
+
+# A1 — IST timezone constant (no pytz dependency)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def is_admin(update: Update) -> bool:
     return str(update.effective_user.id) == ADMIN_CHAT_ID
 
 
-async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# B4 — helper used by all commands; replies with error instead of silently returning
+async def _require_admin(update: Update) -> bool:
     if not is_admin(update):
+        await update.message.reply_text("⛔ Tere paas yeh command run karne ki permission nahi hai.")
+        return False
+    return True
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _require_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
     top   = await asyncio.to_thread(db.get_top_asins, 3)
-    now   = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    now   = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
 
     top_lines = ""
     for i, (asin, title, cnt) in enumerate(top, 1):
@@ -49,7 +60,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
     await update.message.reply_text(
@@ -62,7 +73,7 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
     await update.message.reply_text(
@@ -79,7 +90,7 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
     await update.message.reply_text(
@@ -91,7 +102,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
     rows = await asyncio.to_thread(db.get_top_asins, 5)
     if not rows:
@@ -105,7 +116,7 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
     rows = await asyncio.to_thread(db.get_recent_users, 10)
     if not rows:
@@ -113,17 +124,17 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["👥 <b>Last 10 Joined Users</b>\n"]
     for r in rows:
-        name  = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
-        uname = f"@{r['username']}" if r.get("username") else "No username"
+        name   = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
+        uname  = f"@{r['username']}" if r.get("username") else "No username"
         joined = r["joined_at"].strftime("%d %b, %I:%M %p") if r.get("joined_at") else "?"
         lines.append(f"• {name} ({uname})\n  ID: <code>{r['user_id']}</code>  |  {joined}")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
-    now = datetime.now().strftime("%d %b %Y, %I:%M:%S %p")
+    now = datetime.now(IST).strftime("%d %b %Y, %I:%M:%S %p")
     await update.message.reply_text(
         f"✅ <b>Bot is LIVE</b>\n\n"
         f"🕐 Server time: {now} IST\n"
@@ -132,54 +143,102 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# A6 — smart broadcast: shows UI to choose all users or select specific users
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
-    if not context.args:
+
+    if context.args:
+        # Legacy one-liner: /broadcast <message> — ask for confirmation before sending
+        msg   = " ".join(context.args)
+        total = await asyncio.to_thread(db.get_user_count_total)
+        context.user_data["broadcast_mode"]  = "all"
+        context.user_data["broadcast_draft"] = msg
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirm Send", callback_data="bc_confirm"),
+            InlineKeyboardButton("❌ Cancel",       callback_data="bc_cancel"),
+        ]])
         await update.message.reply_text(
-            "Usage: /broadcast &lt;message&gt;\n"
-            "Example: /broadcast Aaj ka best deal: https://amzn.to/xyz",
+            f"📋 <b>Preview:</b>\n\n{msg}\n\n"
+            f"⚠️ Yeh message <b>SAARE {total:,} users</b> ko jayega!",
             parse_mode="HTML",
+            reply_markup=kb,
         )
         return
 
-    message = " ".join(context.args)
-    user_ids = await asyncio.to_thread(db.get_all_user_ids)
-    sent = 0
-    failed = 0
-
-    status_msg = await update.message.reply_text(
-        f"📢 Broadcasting to {len(user_ids):,} users..."
-    )
-
-    for uid in user_ids:
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=message,
-                disable_web_page_preview=False,
-            )
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)
-
-    await status_msg.edit_text(
-        f"✅ <b>Broadcast complete!</b>\n\n"
-        f"Sent:   {sent:,}\n"
-        f"Failed: {failed:,}",
+    # Interactive smart broadcast menu
+    context.user_data.pop("broadcast_mode",     None)
+    context.user_data.pop("broadcast_selected", None)
+    context.user_data.pop("broadcast_draft",    None)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📢 Send to ALL",   callback_data="bc_all"),
+        InlineKeyboardButton("👥 Select Users",  callback_data="bc_select"),
+    ]])
+    await update.message.reply_text(
+        "📢 <b>Broadcast</b>\n\nKinhe message bhejna hai?",
         parse_mode="HTML",
+        reply_markup=kb,
     )
+
+
+# A6 — paginated user selection helper (called from handle_callback in bot.py)
+async def _show_user_selection_page(
+    query_or_msg,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int,
+    edit: bool = False,
+):
+    offset      = page * 10
+    users       = await asyncio.to_thread(db.get_users_paginated, offset, 10)
+    total       = await asyncio.to_thread(db.get_user_count_total)
+    total_pages = max(1, (total + 9) // 10)
+    selected    = context.user_data.get("broadcast_selected", [])
+
+    buttons = []
+    for u in users:
+        uid   = u["user_id"]
+        name  = u.get("first_name") or "User"
+        uname = f"@{u['username']}" if u.get("username") else f"ID:{uid}"
+        check = "✅" if uid in selected else "☐"
+        buttons.append([InlineKeyboardButton(
+            f"{check} {name} ({uname})",
+            callback_data=f"bc_toggle_{uid}",
+        )])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"bc_page_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="noop"))
+    if (page + 1) * 10 < total:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"bc_page_{page + 1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton(
+        f"✅ Done ({len(selected)} selected)", callback_data="bc_done_select",
+    )])
+
+    kb   = InlineKeyboardMarkup(buttons)
+    text = (
+        f"👥 <b>Select Users</b> — Page {page + 1}/{total_pages}\n"
+        f"<i>Jinko message bhejna hai unhe check karo</i>"
+    )
+
+    if edit:
+        try:
+            await query_or_msg.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+    else:
+        await query_or_msg.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    if not await _require_admin(update):
         return
-    stats  = await asyncio.to_thread(db.get_stats)
-    top    = await asyncio.to_thread(db.get_top_asins, 5)
-    now    = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    lines  = [
-        f"📊 <b>DB Snapshot</b>  —  <i>{now}</i>\n",
+    stats = await asyncio.to_thread(db.get_stats)
+    top   = await asyncio.to_thread(db.get_top_asins, 5)
+    now   = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
+    lines = [
+        f"📊 <b>DB Snapshot</b>  —  <i>{now} IST</i>\n",
         f"Users:         {stats['total_users']:,}",
         f"Month users:   {stats['month_users']:,}",
         f"Today users:   {stats['today_users']:,}",
