@@ -34,8 +34,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN     = os.environ["BOT_TOKEN"]
-ADMIN_CHAT_ID = os.environ["ADMIN_CHAT_ID"]
+# FIX-3/4: Graceful error messages instead of cryptic KeyError on missing env vars
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise SystemExit("FATAL: BOT_TOKEN environment variable is not set.")
+
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+if not ADMIN_CHAT_ID:
+    raise SystemExit("FATAL: ADMIN_CHAT_ID environment variable is not set.")
 
 # A1 — IST timezone constant (no pytz needed)
 IST = timezone(timedelta(hours=5, minutes=30))
