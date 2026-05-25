@@ -7,7 +7,7 @@ import requests
 CREDENTIAL_ID      = os.environ["CREDENTIAL_ID"]
 CREDENTIAL_SECRET  = os.environ["CREDENTIAL_SECRET"]
 CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION", "3.2")
-PARTNER_TAG        = os.environ.get("PARTNER_TAG", "dealskoti-21")
+PARTNER_TAG        = os.environ.get("PARTNER_TAG", "shoppinggpt-21")
 MARKETPLACE        = os.environ.get("MARKETPLACE", "www.amazon.in")
 
 VERSION_TOKEN_URLS = {
@@ -44,6 +44,7 @@ PRODUCT_RESOURCES = [
     "offersV2.listings.availability",
     "offersV2.listings.condition",
     "offersV2.listings.dealDetails",
+    "offersV2.listings.programEligibility",
     "customerReviews.count",
     "customerReviews.starRating",
 ]
@@ -56,6 +57,7 @@ SEARCH_RESOURCES = [
     "offersV2.listings.price",
     "offersV2.listings.availability",
     "offersV2.listings.dealDetails",
+    "offersV2.listings.programEligibility",
     "customerReviews.starRating",
     "customerReviews.count",
 ]
@@ -116,12 +118,10 @@ def build_affiliate_link(asin: str) -> str:
 # B2 — double-checked locking pattern prevents token refresh race condition
 def _get_token() -> str:
     now = time.time()
-    # Fast path — no lock needed if token is valid
     if _token_cache["token"] and now < _token_cache["expires_at"]:
         return _token_cache["token"]
 
     with _token_lock:
-        # Re-check inside lock — another thread may have refreshed it already
         if _token_cache["token"] and time.time() < _token_cache["expires_at"]:
             return _token_cache["token"]
 
@@ -171,29 +171,45 @@ def _parse_item(item: dict, asin: str) -> dict:
 
     listings = item.get("offersV2", {}).get("listings", [])
     if listings:
-        listing  = listings[0]
+        listing   = listings[0]
         price_obj = listing.get("price", {})
         money     = price_obj.get("money", {})
         if money:
             data["price"]        = money.get("displayAmount", "")
-            data["price_amount"] = float(money.get("amount", 0))
+            data["price_amount"] = float(money.get("amount", 0) or 0)
+
         savings   = price_obj.get("savings", {})
         sav_money = savings.get("money", {})
         if sav_money:
-            data["savings"] = sav_money.get("displayAmount", "")
+            data["savings"]        = sav_money.get("displayAmount", "")
+            sav_amt = float(sav_money.get("amount", 0) or 0)
+            if sav_amt and data.get("price_amount"):
+                mrp_amt        = data["price_amount"] + sav_amt
+                data["mrp_amount"] = mrp_amt
+                # Format MRP as Indian rupees display string
+                data["mrp"] = f"₹{mrp_amt:,.0f}"
+
         sav_pct = savings.get("percentage")
         if sav_pct is not None:
             data["discount_pct"] = sav_pct
+
         avail = listing.get("availability", {})
         if avail:
             data["availability"] = avail.get("message", "")
+
+        # Prime eligibility
+        prog = listing.get("programEligibility", {})
+        if prog.get("isPrimeEligible") or prog.get("isBuyBoxWinner"):
+            data["is_prime"] = True
 
     cr   = item.get("customerReviews", {})
     if cr.get("count") is not None:
         data["review_count"] = cr["count"]
     star = cr.get("starRating", {})
     if star:
-        data["rating"] = star.get("value", "")
+        val = star.get("value", "")
+        if val:
+            data["rating"] = val
 
     data["affiliate_link"] = build_affiliate_link(asin)
     return data
