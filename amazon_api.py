@@ -1,312 +1,131 @@
 import os
-import re
-import time
-import threading
-import requests
-from collections import OrderedDict
+import json
+import logging
+from datetime import date
+from openai import OpenAI
 
-# FIX-3: Graceful error on missing credentials instead of cryptic KeyError
-CREDENTIAL_ID      = os.environ.get("CREDENTIAL_ID")
-CREDENTIAL_SECRET  = os.environ.get("CREDENTIAL_SECRET")
-if not CREDENTIAL_ID or not CREDENTIAL_SECRET:
-    raise SystemExit("FATAL: CREDENTIAL_ID and CREDENTIAL_SECRET environment variables must be set.")
-CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION", "3.2")
-PARTNER_TAG        = os.environ.get("PARTNER_TAG", "shoppinggpt-21")
-MARKETPLACE        = os.environ.get("MARKETPLACE", "www.amazon.in")
+logger = logging.getLogger(__name__)
 
-VERSION_TOKEN_URLS = {
-    "2.1": "https://creatorsapi.auth.us-east-1.amazoncognito.com/oauth2/token",
-    "2.2": "https://creatorsapi.auth.eu-south-2.amazoncognito.com/oauth2/token",
-    "2.3": "https://creatorsapi.auth.us-west-2.amazoncognito.com/oauth2/token",
-    "3.1": "https://api.amazon.com/auth/o2/token",
-    "3.2": "https://api.amazon.co.uk/auth/o2/token",
-    "3.3": "https://api.amazon.co.jp/auth/o2/token",
-}
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# FIX-2: Warn instead of crashing entire bot at import time; each function handles missing key
+if not OPENAI_API_KEY:
+    logger.warning("OPENAI_API_KEY is not set — AI features (Simi, intent detection) will be disabled.")
 
-SCOPE    = "creatorsapi::default" if CREDENTIAL_VERSION.startswith("3.") else "creatorsapi/default"
-API_BASE = "https://creatorsapi.amazon"
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-ITEMS_ENDPOINT  = f"{API_BASE}/catalog/v1/getItems"
-SEARCH_ENDPOINT = f"{API_BASE}/catalog/v1/searchItems"
+INTENT_MODEL = "gpt-4o-mini"
+CHAT_MODEL   = "gpt-4.1-mini"
 
-# FIX-13: Added re.IGNORECASE so lowercase ASIN characters in URLs are also matched
-ASIN_PATTERN = re.compile(r"/(?:dp|gp/product|exec/obidos/ASIN|o/ASIN)/([A-Z0-9]{10})", re.IGNORECASE)
+INTENT_PROMPT = """Classify this user message into exactly one intent:
+- "product_link": contains an Amazon URL or a standalone ASIN (10 chars, starts with B or number)
+- "alert_request": user wants to set a price alert for a category/product type (e.g. "headphones pe alert lagao")
+- "search_query": natural language product search or recommendation request
+- "support": shopping advice, product questions, comparisons in words, general help
+- "off_topic": anything unrelated to shopping or Amazon products
 
-# B2 — token cache with thread lock to prevent race conditions
-_token_cache: dict = {"token": None, "expires_at": 0}
-_token_lock  = threading.Lock()
+Respond with JSON only: {"intent": "product_link|alert_request|search_query|support|off_topic"}
+Message: {message}"""
 
-# B8 — cache resolved short URLs so we never hit Amazon twice for the same link
-# FIX-6: Use OrderedDict with max size to prevent unbounded memory growth (LRU eviction)
-_URL_CACHE_MAX = 500
-_url_cache: OrderedDict[str, str] = OrderedDict()
+SIMI_SYSTEM = """You are Simi, a warm and helpful Amazon India shopping assistant inside a Telegram bot called Shopping GPT.
 
-PRODUCT_RESOURCES = [
-    "images.primary.large",
-    "itemInfo.title",
-    "itemInfo.byLineInfo",
-    "itemInfo.features",
-    "itemInfo.classifications",
-    "offersV2.listings.price",
-    "offersV2.listings.availability",
-    "offersV2.listings.condition",
-    "offersV2.listings.dealDetails",
-    "offersV2.listings.programEligibility",
-    "customerReviews.count",
-    "customerReviews.starRating",
-]
+TODAY'S DATE: {today}
 
-SEARCH_RESOURCES = [
-    "images.primary.medium",
-    "itemInfo.title",
-    "itemInfo.byLineInfo",
-    "itemInfo.classifications",
-    "offersV2.listings.price",
-    "offersV2.listings.availability",
-    "offersV2.listings.dealDetails",
-    "offersV2.listings.programEligibility",
-    "customerReviews.starRating",
-    "customerReviews.count",
-]
+YOUR JOB:
+- Give shopping advice, buying tips, and product comparisons in Hinglish.
+- Help users decide WHAT to buy — not to search for them (the bot handles search automatically).
+- When recommending, give 2-3 options max with brief reasons. Then say "type karo naam aur main dhundh deti hoon!"
+- Use your own training knowledge honestly. For phones/laptops/TVs, add: "Latest model aur live price ke liye type karo naam!"
+- NEVER make up prices or specs.
+
+STRICT RULES:
+1. ONLY help with shopping, products, deals, comparisons, buying advice.
+2. If user asks anything unrelated, redirect: "Arre {first_name}! Main sirf shopping mein help kar sakti hoon 😊 Koi product chahiye?"
+3. Warm and friendly tone — like a helpful friend, not a robot.
+4. Match user's language — Hinglish by default, Hindi if Hindi, English if English.
+5. SHORT responses only. No long paragraphs.
+6. NEVER use **bold** or *italic* markdown — plain text only (Telegram mein symbols dikhte hain).
+7. NEVER describe or mention how the bot works internally. Just focus on helping the user.
+
+User's first name: {first_name}"""
 
 
-# B8 — cached URL resolution with better headers
-def resolve_url(url: str) -> str:
-    if url in _url_cache:
-        return _url_cache[url]
+def detect_intent(message: str) -> str:
+    # FIX-2: Return safe default if OpenAI client is not configured
+    if client is None:
+        logger.warning("detect_intent called but OpenAI client is not configured.")
+        return "search_query"
+    raw = "N/A"
     try:
-        resp = requests.get(
-            url,
-            allow_redirects=True,
-            timeout=10,
-            stream=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-IN,en;q=0.9",
-            },
+        resp = client.chat.completions.create(
+            model=INTENT_MODEL,
+            messages=[
+                {"role": "user", "content": INTENT_PROMPT.format(message=message)}
+            ],
+            max_tokens=30,
+            temperature=0,
         )
-        final_url = resp.url
-        resp.close()
-        _url_cache[url] = final_url
-        # FIX-6: Evict oldest entry when cache exceeds max size
-        if len(_url_cache) > _URL_CACHE_MAX:
-            _url_cache.popitem(last=False)
-        return final_url
-    except Exception:
-        return url
+        raw = resp.choices[0].message.content.strip()
+        data = json.loads(raw)
+        return data.get("intent", "search_query")
+    except Exception as e:
+        # FIX-10: Use logger instead of print for structured logging
+        logger.error("detect_intent error: %s | Raw: %s", e, raw)
+        return "search_query"
 
 
-def extract_asin(text: str) -> tuple:
-    text = text.strip()
-
-    if re.fullmatch(r"[A-Z0-9]{10}", text):
-        return text, None
-
-    if re.search(r"amzn\.(to|in)/", text):
-        text = resolve_url(text)
-
-    if "/s?" in text or "/s/" in text or "field-keywords" in text:
-        return None, "search"
-
-    match = ASIN_PATTERN.search(text)
-    if match:
-        return match.group(1), None
-
-    q_match = re.search(r"[?&]ASIN=([A-Z0-9]{10})", text)
-    if q_match:
-        return q_match.group(1), None
-
-    return None, "invalid"
-
-
-def build_affiliate_link(asin: str) -> str:
-    tag = PARTNER_TAG.strip().rstrip("?&/ ")
-    return f"https://www.amazon.in/dp/{asin}?tag={tag}"
-
-
-# B2 — double-checked locking pattern prevents token refresh race condition
-def _get_token() -> str:
-    now = time.time()
-    if _token_cache["token"] and now < _token_cache["expires_at"]:
-        return _token_cache["token"]
-
-    with _token_lock:
-        if _token_cache["token"] and time.time() < _token_cache["expires_at"]:
-            return _token_cache["token"]
-
-        token_url = VERSION_TOKEN_URLS.get(CREDENTIAL_VERSION)
-        if not token_url:
-            raise RuntimeError(f"Unsupported CREDENTIAL_VERSION: {CREDENTIAL_VERSION}")
-
-        resp = requests.post(
-            token_url,
-            data={"grant_type": "client_credentials", "scope": SCOPE},
-            auth=(CREDENTIAL_ID, CREDENTIAL_SECRET),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        _token_cache["token"]      = data["access_token"]
-        _token_cache["expires_at"] = time.time() + data.get("expires_in", 3600) - 60
-        return _token_cache["token"]
-
-
-def _parse_item(item: dict, asin: str) -> dict:
-    data: dict = {"asin": asin}
-
-    title_val = item.get("itemInfo", {}).get("title", {})
-    if title_val:
-        data["title"] = title_val.get("displayValue", "")
-
-    brand_val = item.get("itemInfo", {}).get("byLineInfo", {}).get("brand", {})
-    if brand_val:
-        data["brand"] = brand_val.get("displayValue", "")
-
-    class_val = item.get("itemInfo", {}).get("classifications", {})
-    pg = class_val.get("productGroup", {}) if class_val else {}
-    if pg:
-        data["category"] = pg.get("displayValue", "")
-
-    feat_val = item.get("itemInfo", {}).get("features", {})
-    if feat_val:
-        vals = feat_val.get("displayValues", [])
-        if vals:
-            data["features"] = vals[:5]
-
-    img_primary = item.get("images", {}).get("primary", {})
-    img = img_primary.get("large") or img_primary.get("medium") or img_primary.get("small") or {}
-    if img:
-        data["image_url"] = img.get("url", "")
-
-    listings = item.get("offersV2", {}).get("listings", [])
-    if listings:
-        listing   = listings[0]
-        price_obj = listing.get("price", {})
-        money     = price_obj.get("money", {})
-        if money:
-            data["price"]        = money.get("displayAmount", "")
-            data["price_amount"] = float(money.get("amount", 0) or 0)
-
-        savings   = price_obj.get("savings", {})
-        sav_money = savings.get("money", {})
-        if sav_money:
-            data["savings"]        = sav_money.get("displayAmount", "")
-            sav_amt = float(sav_money.get("amount", 0) or 0)
-            if sav_amt and data.get("price_amount"):
-                mrp_amt        = data["price_amount"] + sav_amt
-                data["mrp_amount"] = mrp_amt
-                # Format MRP as Indian rupees display string
-                data["mrp"] = f"₹{mrp_amt:,.0f}"
-
-        sav_pct = savings.get("percentage")
-        if sav_pct is not None:
-            data["discount_pct"] = sav_pct
-
-        avail = listing.get("availability", {})
-        if avail:
-            data["availability"] = avail.get("message", "")
-
-        # Prime eligibility
-        prog = listing.get("programEligibility", {})
-        if prog.get("isPrimeEligible") or prog.get("isBuyBoxWinner"):
-            data["is_prime"] = True
-
-    cr   = item.get("customerReviews", {})
-    if cr.get("count") is not None:
-        data["review_count"] = cr["count"]
-    star = cr.get("starRating", {})
-    if star:
-        val = star.get("value", "")
-        if val:
-            data["rating"] = val
-
-    data["affiliate_link"] = build_affiliate_link(asin)
-    return data
-
-
-def get_product_info(asin: str) -> dict:
-    token   = _get_token()
-    payload = {
-        "partnerTag": PARTNER_TAG,
-        "itemIds":    [asin],
-        "resources":  PRODUCT_RESOURCES,
-    }
+def extract_search_query_from_alert(message: str) -> str:
+    # FIX-2: Return original message as fallback if OpenAI client is not configured
+    if client is None:
+        logger.warning("extract_search_query_from_alert called but OpenAI client is not configured.")
+        return message
     try:
-        resp = requests.post(
-            ITEMS_ENDPOINT,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "x-marketplace": MARKETPLACE,
-                "Content-Type":  "application/json",
-            },
-            timeout=20,
+        resp = client.chat.completions.create(
+            model=INTENT_MODEL,
+            messages=[
+                {"role": "user", "content": (
+                    "Extract the product search query from this message for Amazon India search. "
+                    "Return only the search query, nothing else.\n"
+                    f"Message: {message}\n"
+                    "Examples:\n"
+                    "'headphones under 999 pe alert lagao' → 'headphones under 999'\n"
+                    "'I want alert for gaming mouse below 2000' → 'gaming mouse under 2000'\n"
+                    "Query:"
+                )}
+            ],
+            max_tokens=30,
+            temperature=0,
         )
-    except requests.Timeout:
-        raise RuntimeError("Amazon API timeout — thodi der baad try karo.")
-    except requests.ConnectionError:
-        raise RuntimeError("Amazon API se connect nahi ho pa raha.")
-
-    if resp.status_code == 403:
-        # FIX-11: Invalidate cached token on 403 so next call gets a fresh one
-        with _token_lock:
-            _token_cache["token"]      = None
-            _token_cache["expires_at"] = 0
-        raise RuntimeError("Access denied. API credentials check karo.")
-    if resp.status_code not in (200, 206):
-        raise RuntimeError(f"Amazon API error: {resp.status_code}")
-
-    body  = resp.json()
-    items = body.get("itemsResult", {}).get("items", [])
-
-    if not items:
-        errors = body.get("errors", [])
-        msg = errors[0].get("message", "Product not found.") if errors else "Product not found or unavailable."
-        raise ValueError(msg)
-
-    return _parse_item(items[0], asin)
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        # FIX-10: Use logger instead of print
+        logger.error("extract_search_query_from_alert error: %s", e)
+        return message
 
 
-def search_items(query: str, count: int = 5) -> list:
-    token   = _get_token()
-    payload = {
-        "partnerTag":  PARTNER_TAG,
-        "keywords":    query,
-        "searchIndex": "All",
-        "itemCount":   count,
-        "resources":   SEARCH_RESOURCES,
-    }
+def simi_reply(first_name: str, history: list, user_message: str) -> str:
+    # FIX-2: Return graceful fallback if OpenAI client is not configured
+    if client is None:
+        logger.warning("simi_reply called but OpenAI client is not configured.")
+        return "Abhi AI assistant available nahi hai. Seedha Amazon link ya search query bhejo! 🛍️"
+
+    today_str = date.today().strftime("%d %B %Y")
+    messages = [
+        {"role": "system", "content": SIMI_SYSTEM.format(first_name=first_name, today=today_str)}
+    ]
+    valid_history = [m for m in history[-10:] if "role" in m and "content" in m]
+    for msg in valid_history:
+        messages.append(msg)
+    messages.append({"role": "user", "content": user_message})
+
     try:
-        resp = requests.post(
-            SEARCH_ENDPOINT,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "x-marketplace": MARKETPLACE,
-                "Content-Type":  "application/json",
-            },
-            timeout=20,
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            max_tokens=300,
+            temperature=0.7,
         )
-    except requests.Timeout:
-        raise RuntimeError("Amazon search timeout — thodi der baad try karo.")
-    except requests.ConnectionError:
-        raise RuntimeError("Amazon API se connect nahi ho pa raha.")
-
-    if resp.status_code == 403:
-        # FIX-11: Invalidate cached token on 403 in search too
-        with _token_lock:
-            _token_cache["token"]      = None
-            _token_cache["expires_at"] = 0
-        raise RuntimeError("Access denied. API credentials check karo.")
-    if resp.status_code not in (200, 206):
-        raise RuntimeError(f"Amazon search error: {resp.status_code}")
-
-    body    = resp.json()
-    items   = body.get("searchResult", {}).get("items", [])
-    results = []
-    for item in items:
-        asin = item.get("asin", "")
-        if asin:
-            results.append(_parse_item(item, asin))
-    return results
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        # FIX-10: Use logger instead of print
+        logger.error("simi_reply error: %s", e)
+        return "Kuch technical issue aa gaya 😅 Thodi der baad try karo, Simi wapas aa jaayegi!"
