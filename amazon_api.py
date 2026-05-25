@@ -3,9 +3,13 @@ import re
 import time
 import threading
 import requests
+from collections import OrderedDict
 
-CREDENTIAL_ID      = os.environ["CREDENTIAL_ID"]
-CREDENTIAL_SECRET  = os.environ["CREDENTIAL_SECRET"]
+# FIX-3: Graceful error on missing credentials instead of cryptic KeyError
+CREDENTIAL_ID      = os.environ.get("CREDENTIAL_ID")
+CREDENTIAL_SECRET  = os.environ.get("CREDENTIAL_SECRET")
+if not CREDENTIAL_ID or not CREDENTIAL_SECRET:
+    raise SystemExit("FATAL: CREDENTIAL_ID and CREDENTIAL_SECRET environment variables must be set.")
 CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION", "3.2")
 PARTNER_TAG        = os.environ.get("PARTNER_TAG", "shoppinggpt-21")
 MARKETPLACE        = os.environ.get("MARKETPLACE", "www.amazon.in")
@@ -25,14 +29,17 @@ API_BASE = "https://creatorsapi.amazon"
 ITEMS_ENDPOINT  = f"{API_BASE}/catalog/v1/getItems"
 SEARCH_ENDPOINT = f"{API_BASE}/catalog/v1/searchItems"
 
-ASIN_PATTERN = re.compile(r"/(?:dp|gp/product|exec/obidos/ASIN|o/ASIN)/([A-Z0-9]{10})")
+# FIX-13: Added re.IGNORECASE so lowercase ASIN characters in URLs are also matched
+ASIN_PATTERN = re.compile(r"/(?:dp|gp/product|exec/obidos/ASIN|o/ASIN)/([A-Z0-9]{10})", re.IGNORECASE)
 
 # B2 — token cache with thread lock to prevent race conditions
 _token_cache: dict = {"token": None, "expires_at": 0}
 _token_lock  = threading.Lock()
 
 # B8 — cache resolved short URLs so we never hit Amazon twice for the same link
-_url_cache: dict[str, str] = {}
+# FIX-6: Use OrderedDict with max size to prevent unbounded memory growth (LRU eviction)
+_URL_CACHE_MAX = 500
+_url_cache: OrderedDict[str, str] = OrderedDict()
 
 PRODUCT_RESOURCES = [
     "images.primary.large",
@@ -82,6 +89,9 @@ def resolve_url(url: str) -> str:
         final_url = resp.url
         resp.close()
         _url_cache[url] = final_url
+        # FIX-6: Evict oldest entry when cache exceeds max size
+        if len(_url_cache) > _URL_CACHE_MAX:
+            _url_cache.popitem(last=False)
         return final_url
     except Exception:
         return url
@@ -239,6 +249,10 @@ def get_product_info(asin: str) -> dict:
         raise RuntimeError("Amazon API se connect nahi ho pa raha.")
 
     if resp.status_code == 403:
+        # FIX-11: Invalidate cached token on 403 so next call gets a fresh one
+        with _token_lock:
+            _token_cache["token"]      = None
+            _token_cache["expires_at"] = 0
         raise RuntimeError("Access denied. API credentials check karo.")
     if resp.status_code not in (200, 206):
         raise RuntimeError(f"Amazon API error: {resp.status_code}")
@@ -279,6 +293,12 @@ def search_items(query: str, count: int = 5) -> list:
     except requests.ConnectionError:
         raise RuntimeError("Amazon API se connect nahi ho pa raha.")
 
+    if resp.status_code == 403:
+        # FIX-11: Invalidate cached token on 403 in search too
+        with _token_lock:
+            _token_cache["token"]      = None
+            _token_cache["expires_at"] = 0
+        raise RuntimeError("Access denied. API credentials check karo.")
     if resp.status_code not in (200, 206):
         raise RuntimeError(f"Amazon search error: {resp.status_code}")
 
