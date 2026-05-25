@@ -57,6 +57,8 @@ async def check_prices(bot):
                     # B7 — update tracked_price = new_price so next alert fires
                     # only if price drops FURTHER below this new level
                     await asyncio.to_thread(db.update_alert_price, alert["id"], new_price)
+                    # FIX-8: Actually use the notified flag that was defined but never called
+                    await asyncio.to_thread(db.mark_alert_notified, alert["id"])
 
             await asyncio.sleep(0.5)
 
