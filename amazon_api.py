@@ -1,131 +1,396 @@
 import os
-import json
+import re
+import time
 import logging
-from datetime import date
-from openai import OpenAI
+import requests
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-# FIX-2: Warn instead of crashing entire bot at import time; each function handles missing key
-if not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY is not set — AI features (Simi, intent detection) will be disabled.")
+CREDENTIAL_ID      = os.environ.get("AMAZON_CREDENTIAL_ID", "")
+CREDENTIAL_SECRET  = os.environ.get("AMAZON_CREDENTIAL_SECRET", "")
+CREDENTIAL_VERSION = os.environ.get("AMAZON_CREDENTIAL_VERSION", "v1")
+PARTNER_TAG        = os.environ.get("AMAZON_PARTNER_TAG", "")
+MARKETPLACE        = os.environ.get("AMAZON_MARKETPLACE", "www.amazon.in")
 
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+IST = timezone(timedelta(hours=5, minutes=30))
 
-INTENT_MODEL = "gpt-4o-mini"
-CHAT_MODEL   = "gpt-4.1-mini"
+_cache: dict = {}
+_CACHE_TTL = 900
 
-INTENT_PROMPT = """Classify this user message into exactly one intent:
-- "product_link": contains an Amazon URL or a standalone ASIN (10 chars, starts with B or number)
-- "alert_request": user wants to set a price alert for a category/product type (e.g. "headphones pe alert lagao")
-- "search_query": natural language product search or recommendation request
-- "support": shopping advice, product questions, comparisons in words, general help
-- "off_topic": anything unrelated to shopping or Amazon products
-
-Respond with JSON only: {"intent": "product_link|alert_request|search_query|support|off_topic"}
-Message: {message}"""
-
-SIMI_SYSTEM = """You are Simi, a warm and helpful Amazon India shopping assistant inside a Telegram bot called Shopping GPT.
-
-TODAY'S DATE: {today}
-
-YOUR JOB:
-- Give shopping advice, buying tips, and product comparisons in Hinglish.
-- Help users decide WHAT to buy — not to search for them (the bot handles search automatically).
-- When recommending, give 2-3 options max with brief reasons. Then say "type karo naam aur main dhundh deti hoon!"
-- Use your own training knowledge honestly. For phones/laptops/TVs, add: "Latest model aur live price ke liye type karo naam!"
-- NEVER make up prices or specs.
-
-STRICT RULES:
-1. ONLY help with shopping, products, deals, comparisons, buying advice.
-2. If user asks anything unrelated, redirect: "Arre {first_name}! Main sirf shopping mein help kar sakti hoon 😊 Koi product chahiye?"
-3. Warm and friendly tone — like a helpful friend, not a robot.
-4. Match user's language — Hinglish by default, Hindi if Hindi, English if English.
-5. SHORT responses only. No long paragraphs.
-6. NEVER use **bold** or *italic* markdown — plain text only (Telegram mein symbols dikhte hain).
-7. NEVER describe or mention how the bot works internally. Just focus on helping the user.
-
-User's first name: {first_name}"""
+_api_client = None
+_api_client_lock = __import__("threading").Lock()
 
 
-def detect_intent(message: str) -> str:
-    # FIX-2: Return safe default if OpenAI client is not configured
-    if client is None:
-        logger.warning("detect_intent called but OpenAI client is not configured.")
-        return "search_query"
-    raw = "N/A"
-    try:
-        resp = client.chat.completions.create(
-            model=INTENT_MODEL,
-            messages=[
-                {"role": "user", "content": INTENT_PROMPT.format(message=message)}
-            ],
-            max_tokens=30,
-            temperature=0,
-        )
-        raw = resp.choices[0].message.content.strip()
-        data = json.loads(raw)
-        return data.get("intent", "search_query")
-    except Exception as e:
-        # FIX-10: Use logger instead of print for structured logging
-        logger.error("detect_intent error: %s | Raw: %s", e, raw)
-        return "search_query"
+def _get_api():
+    global _api_client
+    if _api_client is None:
+        with _api_client_lock:
+            if _api_client is None:
+                try:
+                    from creatorsapi_python_sdk.api_client import ApiClient
+                    from creatorsapi_python_sdk.api.default_api import DefaultApi
+                    client = ApiClient(
+                        credential_id=CREDENTIAL_ID,
+                        credential_secret=CREDENTIAL_SECRET,
+                        version=CREDENTIAL_VERSION,
+                    )
+                    _api_client = DefaultApi(client)
+                    logger.info("Amazon API client initialized successfully")
+                except Exception as e:
+                    logger.error("Failed to initialize Amazon API client: %s", e)
+                    raise
+    return _api_client
 
 
-def extract_search_query_from_alert(message: str) -> str:
-    # FIX-2: Return original message as fallback if OpenAI client is not configured
-    if client is None:
-        logger.warning("extract_search_query_from_alert called but OpenAI client is not configured.")
-        return message
-    try:
-        resp = client.chat.completions.create(
-            model=INTENT_MODEL,
-            messages=[
-                {"role": "user", "content": (
-                    "Extract the product search query from this message for Amazon India search. "
-                    "Return only the search query, nothing else.\n"
-                    f"Message: {message}\n"
-                    "Examples:\n"
-                    "'headphones under 999 pe alert lagao' → 'headphones under 999'\n"
-                    "'I want alert for gaming mouse below 2000' → 'gaming mouse under 2000'\n"
-                    "Query:"
-                )}
-            ],
-            max_tokens=30,
-            temperature=0,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        # FIX-10: Use logger instead of print
-        logger.error("extract_search_query_from_alert error: %s", e)
-        return message
+def _safe_get(obj, *keys, default=None):
+    for key in keys:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            obj = obj.get(key)
+        elif hasattr(obj, key):
+            obj = getattr(obj, key)
+        elif isinstance(key, int) and isinstance(obj, (list, tuple)):
+            obj = obj[key] if len(obj) > key else None
+        else:
+            return default
+    return obj if obj is not None else default
 
 
-def simi_reply(first_name: str, history: list, user_message: str) -> str:
-    # FIX-2: Return graceful fallback if OpenAI client is not configured
-    if client is None:
-        logger.warning("simi_reply called but OpenAI client is not configured.")
-        return "Abhi AI assistant available nahi hai. Seedha Amazon link ya search query bhejo! 🛍️"
+def _parse_item(item) -> dict:
+    d = item.to_dict() if hasattr(item, "to_dict") else item
+    info: dict = {"asin": d.get("asin", "")}
 
-    today_str = date.today().strftime("%d %B %Y")
-    messages = [
-        {"role": "system", "content": SIMI_SYSTEM.format(first_name=first_name, today=today_str)}
+    title_obj = _safe_get(d, "item_info", "title", "display_value")
+    info["title"] = title_obj or ""
+
+    brand_obj = _safe_get(d, "item_info", "by_line_info", "brand", "display_value")
+    info["brand"] = brand_obj or ""
+
+    cat_obj = _safe_get(d, "item_info", "classifications", "product_group", "display_value")
+    info["category"] = cat_obj or ""
+
+    features_raw = _safe_get(d, "item_info", "features", "display_values") or []
+    info["features"] = [str(f) for f in features_raw[:8]]
+
+    image_obj = _safe_get(d, "images", "primary", "large", "url") or \
+                _safe_get(d, "images", "primary", "medium", "url")
+    info["image_url"] = image_obj or ""
+
+    listings = _safe_get(d, "offers_v2", "listings") or []
+    listing = listings[0] if listings else {}
+
+    price_obj = _safe_get(listing, "price")
+    if price_obj:
+        amount = _safe_get(price_obj, "amount")
+        currency = _safe_get(price_obj, "currency", default="INR")
+        savings = _safe_get(price_obj, "savings")
+        mrp = _safe_get(price_obj, "original_price", "amount")
+        discount_pct = _safe_get(price_obj, "discount_percent") or \
+                       _safe_get(price_obj, "savings_percent")
+
+        if amount:
+            info["price_amount"] = float(amount)
+            info["price"] = f"₹{float(amount):,.0f}"
+        else:
+            info["price_amount"] = 0.0
+            info["price"] = ""
+
+        if mrp:
+            info["mrp"] = f"₹{float(mrp):,.0f}"
+            info["mrp_amount"] = float(mrp)
+        else:
+            info["mrp"] = ""
+            info["mrp_amount"] = 0.0
+
+        if discount_pct:
+            info["discount_pct"] = str(int(float(discount_pct)))
+        else:
+            info["discount_pct"] = ""
+
+        if savings:
+            sav_amt = _safe_get(savings, "amount")
+            info["savings"] = f"₹{float(sav_amt):,.0f}" if sav_amt else ""
+        else:
+            info["savings"] = ""
+    else:
+        info["price_amount"] = 0.0
+        info["price"] = ""
+        info["mrp"] = ""
+        info["mrp_amount"] = 0.0
+        info["discount_pct"] = ""
+        info["savings"] = ""
+
+    avail = _safe_get(listing, "availability", "message") or \
+            _safe_get(listing, "availability", "type")
+    info["availability"] = avail or ""
+
+    cond = _safe_get(listing, "condition", "display_value")
+    info["condition"] = cond or ""
+
+    merchant_name = _safe_get(listing, "merchant_info", "name") or ""
+    info["merchant_name"] = merchant_name
+    info["is_amazon_seller"] = merchant_name.lower() in ("amazon", "amazon seller services pvt ltd")
+
+    delivery = _safe_get(listing, "delivery_info", "is_prime_eligible")
+    if delivery is None:
+        delivery = _safe_get(listing, "is_prime_eligible")
+    info["is_prime"] = bool(delivery)
+
+    loyalty = _safe_get(listing, "loyalty_points", "points")
+    info["loyalty_points"] = int(loyalty) if loyalty else 0
+
+    deal = listing.get("deal_details") or {}
+    if isinstance(deal, dict):
+        deal_type = deal.get("deal_type") or deal.get("type", "")
+        info["is_lightning_deal"] = str(deal_type).upper() == "LIGHTNING_DEAL"
+        end_time = deal.get("end_time") or deal.get("endTime")
+        if end_time:
+            try:
+                if isinstance(end_time, str):
+                    from dateutil.parser import parse as dtparse
+                    end_dt = dtparse(end_time).astimezone(IST)
+                    info["deal_end_time"] = end_dt.strftime("%d %b %I:%M %p IST")
+                else:
+                    info["deal_end_time"] = str(end_time)
+            except Exception:
+                info["deal_end_time"] = str(end_time)
+        else:
+            info["deal_end_time"] = ""
+        dp = deal.get("deal_price") or deal.get("dealPrice")
+        info["deal_price"] = f"₹{float(dp):,.0f}" if dp else ""
+    else:
+        info["is_lightning_deal"] = False
+        info["deal_end_time"] = ""
+        info["deal_price"] = ""
+
+    rating = _safe_get(d, "customer_reviews", "star_rating", "value")
+    info["rating"] = float(rating) if rating else 0.0
+    count = _safe_get(d, "customer_reviews", "count", "display_value") or \
+            _safe_get(d, "customer_reviews", "count")
+    info["review_count"] = int(str(count).replace(",", "")) if count else 0
+
+    browse_nodes = _safe_get(d, "browse_node_info", "browse_nodes") or []
+    if browse_nodes:
+        node = browse_nodes[0] if isinstance(browse_nodes, list) else browse_nodes
+        if isinstance(node, dict):
+            info["sales_rank_category"] = node.get("display_name", "")
+            sr = node.get("sales_rank") or node.get("website_sales_rank")
+            info["sales_rank"] = int(sr) if sr else 0
+        else:
+            info["sales_rank"] = 0
+            info["sales_rank_category"] = ""
+    else:
+        web_rank = _safe_get(d, "browse_node_info", "website_sales_rank", "sales_rank")
+        web_cat = _safe_get(d, "browse_node_info", "website_sales_rank", "display_name")
+        info["sales_rank"] = int(web_rank) if web_rank else 0
+        info["sales_rank_category"] = web_cat or ""
+
+    info["affiliate_link"] = build_affiliate_link(info["asin"])
+    return info
+
+
+def build_affiliate_link(asin: str) -> str:
+    tag = PARTNER_TAG or "defaulttag-21"
+    return f"https://www.amazon.in/dp/{asin}?tag={tag}"
+
+
+def extract_asin(text: str) -> tuple[str | None, str | None]:
+    text = text.strip()
+    search_pattern = r"amazon\.[a-z.]+/s[/?]"
+    if re.search(search_pattern, text, re.IGNORECASE):
+        return None, "search"
+    patterns = [
+        r"amazon\.[a-z.]+/(?:dp|gp/product|exec/obidos/ASIN)/([A-Z0-9]{10})",
+        r"amazon\.[a-z.]+/[^/]+/dp/([A-Z0-9]{10})",
+        r"asin=([A-Z0-9]{10})",
+        r"\b([A-Z][A-Z0-9]{9})\b",
     ]
-    valid_history = [m for m in history[-10:] if "role" in m and "content" in m]
-    for msg in valid_history:
-        messages.append(msg)
-    messages.append({"role": "user", "content": user_message})
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(1).upper(), None
+    if "amzn.to" in text or "amzn.in" in text:
+        try:
+            url = re.search(r"https?://\S+", text)
+            if url:
+                r = requests.head(url.group(), allow_redirects=True, timeout=5)
+                final = r.url
+                m2 = re.search(r"/dp/([A-Z0-9]{10})", final, re.IGNORECASE)
+                if m2:
+                    return m2.group(1).upper(), None
+        except Exception:
+            pass
+    return None, None
+
+
+def get_product_info(asin: str) -> dict:
+    if asin in _cache:
+        data, ts = _cache[asin]
+        if time.time() - ts < _CACHE_TTL:
+            return data
 
     try:
-        resp = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            max_tokens=300,
-            temperature=0.7,
+        api = _get_api()
+        from creatorsapi_python_sdk.models.get_items_request_content import GetItemsRequestContent
+        resources = [
+            "images.primary.large",
+            "images.primary.medium",
+            "itemInfo.title",
+            "itemInfo.features",
+            "itemInfo.byLineInfo",
+            "itemInfo.classifications",
+            "itemInfo.productInfo",
+            "itemInfo.technicalInfo",
+            "offersV2.listings.price",
+            "offersV2.listings.availability",
+            "offersV2.listings.condition",
+            "offersV2.listings.dealDetails",
+            "offersV2.listings.loyaltyPoints",
+            "offersV2.listings.merchantInfo",
+            "offersV2.listings.isBuyBoxWinner",
+            "customerReviews.count",
+            "customerReviews.starRating",
+            "browseNodeInfo.browseNodes",
+            "browseNodeInfo.websiteSalesRank",
+        ]
+        req = GetItemsRequestContent(
+            partner_tag=PARTNER_TAG,
+            item_ids=[asin],
+            resources=resources,
         )
-        return resp.choices[0].message.content.strip()
+        resp = api.get_items(x_marketplace=MARKETPLACE, get_items_request_content=req)
+        resp_dict = resp.to_dict() if hasattr(resp, "to_dict") else {}
+        items_result = resp_dict.get("items_result") or {}
+        items = items_result.get("items") or []
+        if not items:
+            raise ValueError(f"Product not found: {asin}")
+
+        info = _parse_item(items[0])
+        _cache[asin] = (info, time.time())
+        return info
+
     except Exception as e:
-        # FIX-10: Use logger instead of print
-        logger.error("simi_reply error: %s", e)
-        return "Kuch technical issue aa gaya 😅 Thodi der baad try karo, Simi wapas aa jaayegi!"
+        logger.error("get_product_info(%s) error: %s", asin, e)
+        raise
+
+
+def search_products(query: str, item_count: int = 5, max_price: int = None,
+                    min_price: int = None, min_rating: float = None,
+                    min_saving_pct: int = None, sort_by: str = None,
+                    search_index: str = "All") -> list[dict]:
+    try:
+        api = _get_api()
+        from creatorsapi_python_sdk.models.search_items_request_content import SearchItemsRequestContent
+        resources = [
+            "images.primary.medium",
+            "itemInfo.title",
+            "itemInfo.byLineInfo",
+            "itemInfo.classifications",
+            "offersV2.listings.price",
+            "offersV2.listings.availability",
+            "offersV2.listings.dealDetails",
+            "offersV2.listings.loyaltyPoints",
+            "offersV2.listings.merchantInfo",
+            "customerReviews.count",
+            "customerReviews.starRating",
+        ]
+        kwargs: dict = {
+            "partner_tag": PARTNER_TAG,
+            "keywords": query,
+            "search_index": search_index,
+            "item_count": min(item_count, 10),
+            "resources": resources,
+        }
+        if max_price:
+            kwargs["max_price"] = max_price * 100
+        if min_price:
+            kwargs["min_price"] = min_price * 100
+        if min_rating:
+            kwargs["min_reviews_rating"] = int(min_rating)
+        if min_saving_pct:
+            kwargs["min_saving_percent"] = min_saving_pct
+        if sort_by:
+            kwargs["sort_by"] = sort_by
+
+        req = SearchItemsRequestContent(**kwargs)
+        resp = api.search_items(x_marketplace=MARKETPLACE, search_items_request_content=req)
+        resp_dict = resp.to_dict() if hasattr(resp, "to_dict") else {}
+        search_result = resp_dict.get("search_result") or {}
+        items = search_result.get("items") or []
+        return [_parse_item(i) for i in items]
+
+    except Exception as e:
+        logger.error("search_products(%s) error: %s", query, e)
+        return []
+
+
+def search_deals(category_keywords: list[str], min_saving_pct: int = 30,
+                 item_count: int = 5, search_index: str = "All") -> list[dict]:
+    all_results = []
+    seen_asins = set()
+    for kw in category_keywords[:3]:
+        results = search_products(
+            query=kw, item_count=item_count,
+            min_saving_pct=min_saving_pct,
+            sort_by="FEATURED",
+            search_index=search_index,
+        )
+        for r in results:
+            if r["asin"] not in seen_asins and r.get("price_amount", 0) > 0:
+                all_results.append(r)
+                seen_asins.add(r["asin"])
+        if len(all_results) >= item_count:
+            break
+
+    if not all_results and min_saving_pct > 40:
+        return search_deals(category_keywords, min_saving_pct=40, item_count=item_count)
+
+    return all_results[:item_count]
+
+
+def get_lightning_deals(keywords: str = "fashion deals", item_count: int = 10) -> list[dict]:
+    results = search_products(query=keywords, item_count=item_count)
+    lightning = [r for r in results if r.get("is_lightning_deal")]
+    return lightning
+
+
+def get_product_variations(asin: str) -> list[dict]:
+    try:
+        api = _get_api()
+        from creatorsapi_python_sdk.models.get_variations_request_content import GetVariationsRequestContent
+        resources = [
+            "images.primary.medium",
+            "itemInfo.title",
+            "offersV2.listings.price",
+            "variationAttributes",
+        ]
+        req = GetVariationsRequestContent(
+            partner_tag=PARTNER_TAG,
+            asin=asin,
+            resources=resources,
+        )
+        resp = api.get_variations(x_marketplace=MARKETPLACE, get_variations_request_content=req)
+        resp_dict = resp.to_dict() if hasattr(resp, "to_dict") else {}
+        variations_result = resp_dict.get("variations_result") or {}
+        items = variations_result.get("items") or []
+        variants = []
+        for item in items:
+            info = _parse_item(item)
+            var_attrs = item.get("variation_attributes") or []
+            for attr in var_attrs:
+                name = (attr.get("name") or "").lower()
+                val = attr.get("value") or ""
+                if name in ("color", "colour"):
+                    info["color"] = val
+                elif name in ("size",):
+                    info["size"] = val
+                elif name in ("style", "storage", "storagesize"):
+                    info["storage"] = val
+            variants.append(info)
+        return variants
+
+    except Exception as e:
+        logger.error("get_product_variations(%s) error: %s", asin, e)
+        return []
