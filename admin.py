@@ -8,10 +8,8 @@ from telegram.ext import ContextTypes
 
 import database as db
 
-logger        = logging.getLogger(__name__)
-ADMIN_CHAT_ID = os.environ["ADMIN_CHAT_ID"]
-
-# A1 — IST timezone constant (no pytz dependency)
+logger = logging.getLogger(__name__)
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -19,10 +17,9 @@ def is_admin(update: Update) -> bool:
     return str(update.effective_user.id) == ADMIN_CHAT_ID
 
 
-# B4 — helper used by all commands; replies with error instead of silently returning
 async def _require_admin(update: Update) -> bool:
     if not is_admin(update):
-        await update.message.reply_text("⛔ Tere paas yeh command run karne ki permission nahi hai.")
+        await update.message.reply_text("⛔ Tere paas yeh command use karne ki permission nahi hai.")
         return False
     return True
 
@@ -31,31 +28,33 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
-    top   = await asyncio.to_thread(db.get_top_asins, 3)
-    now   = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
-
+    top = await asyncio.to_thread(db.get_top_asins, 3)
+    channels = await asyncio.to_thread(db.get_channel_ids)
+    now = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
     top_lines = ""
     for i, (asin, title, cnt) in enumerate(top, 1):
         top_lines += f"\n  {i}. {(title or asin)[:35]} ({cnt} alerts)"
-
+    ch_info = ", ".join(channels) if channels else "None set"
     await update.message.reply_text(
-        f"🛠 <b>Admin Dashboard</b>\n"
-        f"<i>{now} IST</i>\n\n"
-        f"👥 <b>Users</b>\n"
-        f"  • Total:      {stats['total_users']:,}\n"
-        f"  • This month: {stats['month_users']:,}\n"
-        f"  • Today:      {stats['today_users']:,}\n\n"
-        f"🔗 <b>Affiliate Clicks</b>\n"
-        f"  • Total:      {stats['total_clicks']:,}\n"
-        f"  • This month: {stats['month_clicks']:,}\n"
-        f"  • Today:      {stats['today_clicks']:,}\n\n"
-        f"🔔 <b>Price Alerts</b>\n"
-        f"  • Active:     {stats['total_alerts']:,}\n"
-        f"  • Tracking:   {stats['users_tracking']:,} users\n\n"
-        f"🏆 <b>Top Tracked Products</b>"
-        f"{top_lines if top_lines else chr(10) + '  None yet'}\n\n"
-        f"<b>Commands:</b> /users /clicks /alerts /top /recent /broadcast /backup /ping",
-        parse_mode="HTML",
+        f"🛠 Admin Dashboard\n{now} IST\n\n"
+        f"👥 Users\n"
+        f"  Total:   {stats['total_users']:,}\n"
+        f"  Active:  {stats['active_users']:,} (30d)\n"
+        f"  Month:   {stats['month_users']:,}\n"
+        f"  Today:   {stats['today_users']:,}\n\n"
+        f"🔗 Clicks\n"
+        f"  Total:   {stats['total_clicks']:,}\n"
+        f"  Month:   {stats['month_clicks']:,}\n"
+        f"  Today:   {stats['today_clicks']:,}\n\n"
+        f"🔔 Alerts\n"
+        f"  Active:  {stats['total_alerts']:,}\n"
+        f"  Tracking: {stats['users_tracking']:,} users\n\n"
+        f"📢 Channel Posts Today: {stats['posts_today']:,}\n"
+        f"📡 Channels: {ch_info}\n\n"
+        f"🏆 Top Tracked:{top_lines if top_lines else chr(10) + '  None yet'}\n\n"
+        f"Commands: /users /clicks /alerts /top /recent /broadcast /backup /ping\n"
+        f"/setchannel /removechannel /digest /lightning",
+        parse_mode=None,
     )
 
 
@@ -64,11 +63,11 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     stats = await asyncio.to_thread(db.get_stats)
     await update.message.reply_text(
-        f"👥 <b>User Stats</b>\n\n"
-        f"Total:      <b>{stats['total_users']:,}</b>\n"
-        f"This month: <b>{stats['month_users']:,}</b>\n"
-        f"Today:      <b>{stats['today_users']:,}</b>",
-        parse_mode="HTML",
+        f"👥 User Stats\n\n"
+        f"Total:   {stats['total_users']:,}\n"
+        f"Active:  {stats['active_users']:,} (30d)\n"
+        f"Month:   {stats['month_users']:,}\n"
+        f"Today:   {stats['today_users']:,}"
     )
 
 
@@ -77,27 +76,21 @@ async def cmd_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     stats = await asyncio.to_thread(db.get_stats)
     await update.message.reply_text(
-        f"🔗 <b>Affiliate Click Stats</b>\n\n"
-        f"Total:      <b>{stats['total_clicks']:,}</b>\n"
-        f"This month: <b>{stats['month_clicks']:,}</b>\n"
-        f"Today:      <b>{stats['today_clicks']:,}</b>",
-        parse_mode="HTML",
+        f"🔗 Affiliate Click Stats\n\n"
+        f"Total:   {stats['total_clicks']:,}\n"
+        f"Month:   {stats['month_clicks']:,}\n"
+        f"Today:   {stats['today_clicks']:,}"
     )
 
 
-async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_clicks(update, context)
-
-
-async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_alerts_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update):
         return
     stats = await asyncio.to_thread(db.get_stats)
     await update.message.reply_text(
-        f"🔔 <b>Price Alert Stats</b>\n\n"
-        f"Active alerts:   <b>{stats['total_alerts']:,}</b>\n"
-        f"Users tracking:  <b>{stats['users_tracking']:,}</b>",
-        parse_mode="HTML",
+        f"🔔 Price Alert Stats\n\n"
+        f"Active alerts:  {stats['total_alerts']:,}\n"
+        f"Users tracking: {stats['users_tracking']:,}"
     )
 
 
@@ -108,11 +101,10 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("Abhi koi tracked products nahi hain.")
         return
-    lines = ["🏆 <b>Top 5 Tracked Products</b>\n"]
+    lines = ["🏆 Top 5 Tracked Products\n"]
     for i, (asin, title, cnt) in enumerate(rows, 1):
-        short = (title or asin)[:50]
-        lines.append(f"{i}. {short}\n   ASIN: <code>{asin}</code>  |  {cnt} alerts")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        lines.append(f"{i}. {(title or asin)[:50]}\n   ASIN: {asin}  |  {cnt} alerts")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,11 +114,10 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("Abhi koi users nahi hain.")
         return
-    lines = ["👥 <b>Last 10 Joined Users</b>\n"]
+    lines = ["👥 Last 10 Joined Users\n"]
     for r in rows:
-        name   = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
-        uname  = f"@{r['username']}" if r.get("username") else "No username"
-        # FIX-15: Convert UTC timestamp from DB to IST before formatting
+        name = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
+        uname = f"@{r['username']}" if r.get("username") else "No username"
         raw_ts = r.get("joined_at")
         if raw_ts:
             if raw_ts.tzinfo is None:
@@ -134,8 +125,8 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             joined = raw_ts.astimezone(IST).strftime("%d %b, %I:%M %p IST")
         else:
             joined = "?"
-        lines.append(f"• {name} ({uname})\n  ID: <code>{r['user_id']}</code>  |  {joined}")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        lines.append(f"• {name} ({uname})\n  ID: {r['user_id']}  |  {joined}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,75 +134,133 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     now = datetime.now(IST).strftime("%d %b %Y, %I:%M:%S %p")
     await update.message.reply_text(
-        f"✅ <b>Bot is LIVE</b>\n\n"
-        f"🕐 Server time: {now} IST\n"
-        f"🤖 @Shopping_GPT_Bot — Running normally",
-        parse_mode="HTML",
+        f"✅ Bot is LIVE\n\n🕐 Server time: {now} IST\n🤖 @Shopping_GPT_Bot — Running normally"
     )
 
 
-# A6 — smart broadcast: shows UI to choose all users or select specific users
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _require_admin(update):
+        return
+    stats = await asyncio.to_thread(db.get_stats)
+    top = await asyncio.to_thread(db.get_top_asins, 5)
+    now = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
+    lines = [
+        f"📊 DB Snapshot — {now} IST\n",
+        f"Users:         {stats['total_users']:,}",
+        f"Active (30d):  {stats['active_users']:,}",
+        f"Alerts active: {stats['total_alerts']:,}",
+        f"Total clicks:  {stats['total_clicks']:,}",
+        f"Channel posts: {stats['posts_today']:,} today",
+        "", "🏆 Top Tracked:",
+    ]
+    for asin, title, cnt in top:
+        lines.append(f"  • {(title or asin)[:40]} ({cnt})")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _require_admin(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /setchannel @channelname\n\nBot ko channel ka admin banana mat bhulo!"
+        )
+        return
+    channel = context.args[0]
+    await asyncio.to_thread(db.add_channel, channel)
+    await update.message.reply_text(
+        f"✅ Channel set: {channel}\n\nAb deals aur alerts is channel pe post honge!\n"
+        f"Dhyan raho: Bot ko is channel ka admin hona chahiye."
+    )
+
+
+async def cmd_removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _require_admin(update):
+        return
+    if not context.args:
+        channels = await asyncio.to_thread(db.get_channel_ids)
+        if not channels:
+            await update.message.reply_text("Koi channel set nahi hai.")
+            return
+        await update.message.reply_text(
+            f"Current channels:\n" + "\n".join(channels) +
+            "\n\nUsage: /removechannel @channelname"
+        )
+        return
+    channel = context.args[0]
+    await asyncio.to_thread(db.remove_channel, channel)
+    await update.message.reply_text(f"✅ Channel removed: {channel}")
+
+
+async def cmd_digest_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _require_admin(update):
+        return
+    await update.message.reply_text("📤 Morning digest manually trigger ho raha hai...")
+    from scheduler import send_morning_digest
+    try:
+        await send_morning_digest(context.bot)
+        await update.message.reply_text("✅ Digest bheja gaya!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def cmd_lightning_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _require_admin(update):
+        return
+    await update.message.reply_text("⚡ Lightning deals check ho raha hai...")
+    from scheduler import check_lightning_deals
+    try:
+        await check_lightning_deals(context.bot)
+        await update.message.reply_text("✅ Lightning check complete!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update):
         return
-
     if context.args:
-        # Legacy one-liner: /broadcast <message> — ask for confirmation before sending
-        msg   = " ".join(context.args)
+        msg = " ".join(context.args)
         total = await asyncio.to_thread(db.get_user_count_total)
-        context.user_data["broadcast_mode"]  = "all"
+        context.user_data["broadcast_mode"] = "all"
         context.user_data["broadcast_draft"] = msg
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Confirm Send", callback_data="bc_confirm"),
-            InlineKeyboardButton("❌ Cancel",       callback_data="bc_cancel"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bc_cancel"),
         ]])
         await update.message.reply_text(
-            f"📋 <b>Preview:</b>\n\n{msg}\n\n"
-            f"⚠️ Yeh message <b>SAARE {total:,} users</b> ko jayega!",
-            parse_mode="HTML",
+            f"📋 Preview:\n\n{msg}\n\n⚠️ Yeh message SAARE {total:,} users ko jayega!",
             reply_markup=kb,
         )
         return
-
-    # Interactive smart broadcast menu
-    context.user_data.pop("broadcast_mode",     None)
+    context.user_data.pop("broadcast_mode", None)
     context.user_data.pop("broadcast_selected", None)
-    context.user_data.pop("broadcast_draft",    None)
+    context.user_data.pop("broadcast_draft", None)
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📢 Send to ALL",   callback_data="bc_all"),
-        InlineKeyboardButton("👥 Select Users",  callback_data="bc_select"),
+        InlineKeyboardButton("📢 All Users", callback_data="bc_all"),
+        InlineKeyboardButton("✅ Active (30d)", callback_data="bc_active"),
+        InlineKeyboardButton("👥 Select Users", callback_data="bc_select"),
     ]])
     await update.message.reply_text(
-        "📢 <b>Broadcast</b>\n\nKinhe message bhejna hai?",
-        parse_mode="HTML",
-        reply_markup=kb,
+        "📢 Broadcast\n\nKinhe message bhejna hai?", reply_markup=kb
     )
 
 
-# A6 — paginated user selection helper (called from handle_callback in bot.py)
-async def _show_user_selection_page(
-    query_or_msg,
-    context: ContextTypes.DEFAULT_TYPE,
-    page: int,
-    edit: bool = False,
-):
-    offset      = page * 10
-    users       = await asyncio.to_thread(db.get_users_paginated, offset, 10)
-    total       = await asyncio.to_thread(db.get_user_count_total)
+async def show_user_selection_page(query_or_msg, context, page: int, edit: bool = False):
+    offset = page * 10
+    users = await asyncio.to_thread(db.get_users_paginated, offset, 10)
+    total = await asyncio.to_thread(db.get_user_count_total)
     total_pages = max(1, (total + 9) // 10)
-    selected    = context.user_data.get("broadcast_selected", [])
-
+    selected = context.user_data.get("broadcast_selected", [])
     buttons = []
     for u in users:
-        uid   = u["user_id"]
-        name  = u.get("first_name") or "User"
+        uid = u["user_id"]
+        name = u.get("first_name") or "User"
         uname = f"@{u['username']}" if u.get("username") else f"ID:{uid}"
         check = "✅" if uid in selected else "☐"
         buttons.append([InlineKeyboardButton(
-            f"{check} {name} ({uname})",
-            callback_data=f"bc_toggle_{uid}",
+            f"{check} {name} ({uname})", callback_data=f"bc_toggle_{uid}",
         )])
-
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"bc_page_{page - 1}"))
@@ -222,39 +271,12 @@ async def _show_user_selection_page(
     buttons.append([InlineKeyboardButton(
         f"✅ Done ({len(selected)} selected)", callback_data="bc_done_select",
     )])
-
-    kb   = InlineKeyboardMarkup(buttons)
-    text = (
-        f"👥 <b>Select Users</b> — Page {page + 1}/{total_pages}\n"
-        f"<i>Jinko message bhejna hai unhe check karo</i>"
-    )
-
+    kb = InlineKeyboardMarkup(buttons)
+    text = f"👥 Select Users — Page {page + 1}/{total_pages}\nJinko bhejana hai unhe select karo"
     if edit:
         try:
-            await query_or_msg.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            await query_or_msg.message.edit_text(text, reply_markup=kb)
         except Exception:
             pass
     else:
-        await query_or_msg.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
-
-
-async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _require_admin(update):
-        return
-    stats = await asyncio.to_thread(db.get_stats)
-    top   = await asyncio.to_thread(db.get_top_asins, 5)
-    now   = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
-    lines = [
-        f"📊 <b>DB Snapshot</b>  —  <i>{now} IST</i>\n",
-        f"Users:         {stats['total_users']:,}",
-        f"Month users:   {stats['month_users']:,}",
-        f"Today users:   {stats['today_users']:,}",
-        f"Alerts active: {stats['total_alerts']:,}",
-        f"Total clicks:  {stats['total_clicks']:,}",
-        f"Month clicks:  {stats['month_clicks']:,}",
-        "",
-        "🏆 <b>Top Tracked:</b>",
-    ]
-    for asin, title, cnt in top:
-        lines.append(f"  • {(title or asin)[:40]} ({cnt})")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        await query_or_msg.message.reply_text(text, reply_markup=kb)
