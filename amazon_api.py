@@ -7,11 +7,11 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-CREDENTIAL_ID      = os.environ.get("AMAZON_CREDENTIAL_ID", "")
-CREDENTIAL_SECRET  = os.environ.get("AMAZON_CREDENTIAL_SECRET", "")
-CREDENTIAL_VERSION = os.environ.get("AMAZON_CREDENTIAL_VERSION", "v1")
-PARTNER_TAG        = os.environ.get("AMAZON_PARTNER_TAG", "")
-MARKETPLACE        = os.environ.get("AMAZON_MARKETPLACE", "www.amazon.in")
+CREDENTIAL_ID      = os.environ.get("CREDENTIAL_ID") or os.environ.get("AMAZON_CREDENTIAL_ID", "")
+CREDENTIAL_SECRET  = os.environ.get("CREDENTIAL_SECRET") or os.environ.get("AMAZON_CREDENTIAL_SECRET", "")
+CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION") or os.environ.get("AMAZON_CREDENTIAL_VERSION", "v1")
+PARTNER_TAG        = os.environ.get("PARTNER_TAG") or os.environ.get("AMAZON_PARTNER_TAG", "")
+MARKETPLACE        = os.environ.get("MARKETPLACE") or os.environ.get("AMAZON_MARKETPLACE", "www.amazon.in")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
