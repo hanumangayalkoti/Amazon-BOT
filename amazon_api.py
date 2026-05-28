@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 import re
 import time
 import logging
@@ -7,9 +9,35 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
+# ── Fix: Register root directory as the creatorsapi_python_sdk package ──────
+# The SDK files (api_client.py, configuration.py, rest.py, etc.) all live in
+# the repo root, but they import each other via `creatorsapi_python_sdk.*`.
+# We register the root dir as the package so Python resolves those imports.
+def _register_creatorsapi_sdk():
+    if 'creatorsapi_python_sdk' in sys.modules:
+        return
+    _ROOT = os.path.dirname(os.path.abspath(__file__))
+
+    def _pkg(name, path):
+        m = types.ModuleType(name)
+        m.__path__ = [path]
+        m.__package__ = name
+        m.__file__ = os.path.join(path, '__init__.py')
+        sys.modules[name] = m
+
+    _pkg('creatorsapi_python_sdk', _ROOT)
+    _pkg('creatorsapi_python_sdk.api', _ROOT)
+    _pkg('creatorsapi_python_sdk.auth', _ROOT)
+    _pkg('creatorsapi_python_sdk.models', _ROOT)
+
+_register_creatorsapi_sdk()
+# ─────────────────────────────────────────────────────────────────────────────
+
 CREDENTIAL_ID      = os.environ.get("CREDENTIAL_ID") or os.environ.get("AMAZON_CREDENTIAL_ID", "")
 CREDENTIAL_SECRET  = os.environ.get("CREDENTIAL_SECRET") or os.environ.get("AMAZON_CREDENTIAL_SECRET", "")
-CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION") or os.environ.get("AMAZON_CREDENTIAL_VERSION", "v1")
+# Valid versions: 2.1, 2.2, 2.3 (Cognito) or 3.1, 3.2, 3.3 (LWA)
+# For Amazon India (amazon.in), use 3.1 (LWA via api.amazon.com)
+CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION") or os.environ.get("AMAZON_CREDENTIAL_VERSION", "3.1")
 PARTNER_TAG        = os.environ.get("PARTNER_TAG") or os.environ.get("AMAZON_PARTNER_TAG", "")
 MARKETPLACE        = os.environ.get("MARKETPLACE") or os.environ.get("AMAZON_MARKETPLACE", "www.amazon.in")
 
