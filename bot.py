@@ -29,9 +29,16 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("FATAL: BOT_TOKEN not set.")
+
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 if not ADMIN_CHAT_ID:
     raise SystemExit("FATAL: ADMIN_CHAT_ID not set.")
+
+# FIX: Create a validated integer version at startup to avoid type mixing crashes
+try:
+    ADMIN_CHAT_ID_INT = int(ADMIN_CHAT_ID)
+except ValueError:
+    raise SystemExit(f"FATAL: ADMIN_CHAT_ID must be a numeric user ID, got: {ADMIN_CHAT_ID!r}")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _scheduler = None
@@ -66,8 +73,10 @@ def _cache_get(context: ContextTypes.DEFAULT_TYPE, asin: str) -> dict | None:
 
 
 def _clear_all_modes(context: ContextTypes.DEFAULT_TYPE):
+    # FIX: Added compare_info1/2/3 to prevent stale data after session timeout
     for key in ["compare_step", "compare_asin1", "compare_info1", "compare_asin2", "compare_info2",
-                "compare_started_at", "waiting_for_search", "waiting_for_track",
+                "compare_asin3", "compare_info3", "compare_started_at",
+                "waiting_for_search", "waiting_for_track",
                 "simi_active", "simi_history", "simi_context"]:
         context.user_data.pop(key, None)
 
@@ -118,7 +127,8 @@ def format_product_card(info: dict) -> str:
     if price:
         price_line = f"💰 {price}"
         if disc:
-            badge = "🔥 " if int(disc) >= 30 else ""
+            # FIX: int(float(disc)) — handles decimal strings like "30.5"
+            badge = "🔥 " if int(float(disc)) >= 30 else ""
             price_line += f"\n{badge}📉 {disc}% off"
             if savings:
                 price_line += f"  (save {savings})"
@@ -169,7 +179,8 @@ def format_search_card(info: dict, index: int) -> str:
     if price:
         p_line = f"💰 {price}"
         if disc:
-            badge = "🔥 " if int(disc) >= 30 else ""
+            # FIX: int(float(disc)) — handles decimal strings
+            badge = "🔥 " if int(float(disc)) >= 30 else ""
             p_line += f"  ({badge}{disc}% off)"
         lines.append(p_line)
     rating = info.get("rating", 0)
@@ -240,7 +251,8 @@ async def _notify_admin(context, user, total_users: int, is_new: bool = True):
         now = datetime.now(IST)
         header = "🆕 New User!" if is_new else "🔄 Returning User"
         await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
+            # FIX: Use ADMIN_CHAT_ID_INT (validated int) instead of raw string
+            chat_id=ADMIN_CHAT_ID_INT,
             text=(
                 f"{header}\n\n"
                 f"{uname} ne Shopping GPT Bot start kiya\n\n"
@@ -481,7 +493,8 @@ async def cmd_deals(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price = deal.get("price", "N/A")
             disc = deal.get("discount_pct", "")
             link = deal.get("affiliate_link", "")
-            badge = "🔥 " if disc and int(disc) >= 50 else ""
+            # FIX: int(float(disc)) — handles decimal strings
+            badge = "🔥 " if disc and int(float(disc)) >= 50 else ""
             lines.append(f"{i}. {title}\n   💰 {price}  {badge}{disc + '% off' if disc else ''}\n   👉 {link}")
         lines.append("\n💡 Koi bhi deal ka naam type karo — main dhundh dunga!")
         await wait.edit_text("\n".join(lines), disable_web_page_preview=True)
@@ -599,11 +612,14 @@ async def _do_compare(message, context, infos: list[dict]):
                 f"Product {i+1}: {info.get('title','')[:40]} at {info.get('price','N/A')}"
                 for i, info in enumerate(infos)
             )
-            resp = _client.chat.completions.create(
-                model=INTENT_MODEL,
-                messages=[{"role": "user", "content":
-                    f"Compare these {len(infos)} Amazon India products and give a 2-line Hinglish winner recommendation: {products_desc}"}],
-                max_tokens=100, temperature=0.3,
+            # FIX: Wrap blocking OpenAI call in asyncio.to_thread
+            resp = await asyncio.to_thread(
+                lambda: _client.chat.completions.create(
+                    model=INTENT_MODEL,
+                    messages=[{"role": "user", "content":
+                        f"Compare these {len(infos)} Amazon India products and give a 2-line Hinglish winner recommendation: {products_desc}"}],
+                    max_tokens=100, temperature=0.3,
+                )
             )
             pick = resp.choices[0].message.content.strip()
         else:
@@ -626,11 +642,14 @@ async def _do_compare(message, context, infos: list[dict]):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+    # FIX: Explicit None guard instead of unsafe inline ternary
+    if not update.message:
+        return
+    if not update.message.text:
         await update.message.reply_text(
             "Abhi sirf text aur Amazon links samajh sakta hoon.\n"
             "Seedha Amazon link ya search query bhejo! 🛍️"
-        ) if update.message else None
+        )
         return
 
     text = update.message.text.strip()
@@ -639,6 +658,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              user.first_name, user.last_name)
 
     # Admin broadcast message input
+    # FIX: Use str(user.id) == ADMIN_CHAT_ID (consistent string comparison)
     if context.user_data.get("awaiting_broadcast_msg") and str(user.id) == ADMIN_CHAT_ID:
         context.user_data.pop("awaiting_broadcast_msg", None)
         context.user_data["broadcast_draft"] = text
@@ -753,10 +773,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _do_search(update.message, context, text)
         return
 
-    # Track mode
+    # Track mode — user sent text (not a link), search and show product cards with alert button
     if context.user_data.get("waiting_for_track"):
         context.user_data["waiting_for_track"] = False
-        await update.message.reply_text("❌ Valid Amazon link nahi mila. /track dobara try karo.")
+        await update.message.reply_text(
+            "🔍 Product dhundh raha hoon — result mein 🔔 Alert button dabao!"
+        )
+        await _do_search(update.message, context, text)
         return
 
     await _route_message(update, context, text, user)
@@ -766,7 +789,6 @@ async def _route_message(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
     simi_active = context.user_data.get("simi_active")
 
     if simi_active:
-        # Simi handles everything
         await update.message.chat.send_action(constants.ChatAction.TYPING)
         thinking = await update.message.reply_text("Simi soch rahi hai... 🤔")
         history = context.user_data.get("simi_history", [])
@@ -956,8 +978,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning("Broadcast failed for user %s: %s", uid, e)
                 failed += 1
-            await asyncio.sleep(0.05)
-            if (i + 1) % 25 == 0:
+            # FIX: Increased sleep to 0.1s (10 msg/sec) — safer for Telegram flood limits
+            await asyncio.sleep(0.1)
+            if (i + 1) % 20 == 0:
                 await asyncio.sleep(1)
                 try:
                     await status_msg.edit_text(
@@ -1328,7 +1351,7 @@ def main():
     app.add_handler(CommandHandler("digest", adm.cmd_digest_manual))
     app.add_handler(CommandHandler("lightning", adm.cmd_lightning_manual))
 
-    # Handlers
+    # Message & callback handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, handle_non_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -1363,7 +1386,8 @@ def main():
         try:
             await application.bot.set_my_commands(
                 commands_user + admin_extra,
-                scope=BotCommandScopeChat(chat_id=int(ADMIN_CHAT_ID)),
+                # FIX: Use ADMIN_CHAT_ID_INT (validated int) — prevents crash on set_my_commands
+                scope=BotCommandScopeChat(chat_id=ADMIN_CHAT_ID_INT),
             )
         except Exception:
             pass
