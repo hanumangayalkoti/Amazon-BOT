@@ -470,7 +470,7 @@ def search_deals(
                 query=kw,
                 item_count=item_count,
                 min_saving_pct=threshold if threshold > 0 else None,
-                sort_by="FEATURED",
+                sort_by="Featured",
                 search_index=search_index,
             )
             for r in results:
@@ -499,7 +499,9 @@ def get_product_variations(asin: str) -> list[dict]:
                 "images.primary.medium",
                 "itemInfo.title",
                 "offersV2.listings.price",
-                "variationAttributes",
+                "variationSummary.variationDimension",
+                "variationSummary.price.lowestPrice",
+                "variationSummary.price.highestPrice",
             ],
         })
         items = (data.get("variationsResult") or {}).get("items") or []
