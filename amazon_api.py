@@ -18,6 +18,9 @@ CREDENTIAL_VERSION = os.environ.get("CREDENTIAL_VERSION") or os.environ.get("AMA
 PARTNER_TAG        = os.environ.get("PARTNER_TAG") or os.environ.get("AMAZON_PARTNER_TAG", "")
 MARKETPLACE        = os.environ.get("MARKETPLACE") or os.environ.get("AMAZON_MARKETPLACE", "www.amazon.in")
 
+if not PARTNER_TAG:
+    raise SystemExit("FATAL: PARTNER_TAG env var not set — affiliate links will not work. Set it before starting.")
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ── OAuth Token URLs by version ────────────────────────────────────────────
@@ -293,6 +296,15 @@ def _parse_item(item) -> dict:
         info["sales_rank_category"] = _safe_get(
             d, "browseNodeInfo", "websiteSalesRank", "displayName") or ""
 
+    # ── Color & Model (from productInfo) ─────────────────────────────────────
+    product_info = _safe_get(d, "itemInfo", "productInfo") or {}
+    info["color"] = _safe_get(product_info, "color", "displayValue") or ""
+    info["model_number"] = _safe_get(product_info, "model", "displayValue") or ""
+
+    # ── Tech Formats (e.g. "4K", "Dolby Atmos", "Wi-Fi 6") ──────────────────
+    tech_formats = _safe_get(d, "itemInfo", "technicalInfo", "formats", "displayValues") or []
+    info["tech_formats"] = [str(f) for f in tech_formats[:3]]
+
     info["affiliate_link"] = build_affiliate_link(info["asin"])
     return info
 
@@ -302,8 +314,7 @@ def _parse_item(item) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_affiliate_link(asin: str) -> str:
-    tag = PARTNER_TAG or "defaulttag-21"
-    return f"https://www.amazon.in/dp/{asin}?tag={tag}"
+    return f"https://www.amazon.in/dp/{asin}?tag={PARTNER_TAG}"
 
 
 def extract_asin(text: str) -> tuple[str | None, str | None]:
