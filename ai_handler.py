@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import logging
 from datetime import date
 
@@ -28,6 +29,15 @@ Respond with JSON only: {{"intent": "product_link|alert_request|search_query|sup
 Message: {message}"""
 
 
+# FIX: Helper to strip markdown code fences from AI JSON responses
+def _extract_json_str(raw: str) -> str:
+    raw = raw.strip()
+    # Remove ```json ... ``` or ``` ... ``` wrappers
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return raw.strip()
+
+
 def detect_intent(message: str) -> str:
     if _client is None:
         return "search_query"
@@ -38,10 +48,17 @@ def detect_intent(message: str) -> str:
             messages=[{"role": "user", "content": INTENT_PROMPT.format(message=message)}],
             max_tokens=30,
             temperature=0,
+            # FIX: Force JSON output so json.loads never fails on markdown wrapping
+            response_format={"type": "json_object"},
         )
         raw = resp.choices[0].message.content.strip()
-        data = json.loads(raw)
-        return data.get("intent", "search_query")
+        # FIX: Clean markdown fences before parsing (defensive, even with json_object mode)
+        cleaned = _extract_json_str(raw)
+        data = json.loads(cleaned)
+        intent = data.get("intent", "search_query")
+        # FIX: Validate intent is a known value — prevents bad AI output routing
+        valid_intents = {"product_link", "alert_request", "search_query", "support", "off_topic"}
+        return intent if intent in valid_intents else "search_query"
     except Exception as e:
         logger.error("detect_intent error: %s | raw=%s", e, raw)
         return "search_query"
@@ -49,7 +66,13 @@ def detect_intent(message: str) -> str:
 
 def extract_search_query_from_alert(message: str) -> str:
     if _client is None:
-        return message
+        # FIX: Better fallback — strip common alert trigger words instead of returning raw prompt
+        cleaned = re.sub(
+            r'\b(pe alert|ka alert|alert laga|alert set|alert chahiye|ke liye alert|'
+            r'price drop|price alert|pe notify|notify karo|monitor karo)\b',
+            '', message, flags=re.IGNORECASE
+        ).strip()
+        return cleaned or message
     try:
         resp = _client.chat.completions.create(
             model=INTENT_MODEL,
@@ -65,7 +88,9 @@ def extract_search_query_from_alert(message: str) -> str:
             max_tokens=40,
             temperature=0,
         )
-        return resp.choices[0].message.content.strip()
+        result = resp.choices[0].message.content.strip()
+        # FIX: If AI returns empty or too short, fall back to message
+        return result if len(result) > 2 else message
     except Exception as e:
         logger.error("extract_search_query_from_alert error: %s", e)
         return message
