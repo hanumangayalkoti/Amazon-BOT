@@ -118,6 +118,23 @@ def format_product_card(info: dict) -> str:
     if title:
         t = title[:100] + "…" if len(title) > 100 else title
         lines.append(f"🏷️ {t}")
+
+    # ── Color · Model ─────────────────────────────────────────────────────────
+    color = info.get("color", "")
+    model = info.get("model_number", "")
+    meta_parts = []
+    if color:
+        meta_parts.append(f"🎨 {color}")
+    if model and len(model) <= 35:
+        meta_parts.append(f"🔢 {model}")
+    if meta_parts:
+        lines.append("  ".join(meta_parts))
+
+    # ── Condition (only if non-new) ────────────────────────────────────────────
+    condition = info.get("condition", "")
+    if condition and condition.lower() not in ("new", ""):
+        lines.append(f"📋 Condition: {condition}")
+
     lines.append("")
 
     # ── Deal banner ───────────────────────────────────────────────────────────
@@ -160,6 +177,7 @@ def format_product_card(info: dict) -> str:
         lines.append("🚚 Prime — Free & Fast Delivery")
     if info.get("is_amazon_seller"):
         lines.append("✅ Sold & fulfilled by Amazon")
+        lines.append("🔄 10-day Replacement / Return Eligible")
     else:
         merchant = info.get("merchant_name", "")
         if merchant:
@@ -180,21 +198,32 @@ def format_product_card(info: dict) -> str:
     elif rc:
         lines.append(f"💬 {rc:,} reviews")
 
-    # ── Best Seller badge ─────────────────────────────────────────────────────
+    # ── Best Seller / Rank badge ──────────────────────────────────────────────
     rank     = info.get("sales_rank", 0)
     rank_cat = info.get("sales_rank_category", "")
     if rank and rank_cat:
-        if rank <= 3:
+        if rank == 1:
+            lines.append(f"🥇 #1 Best Seller in {rank_cat}")
+        elif rank <= 3:
             lines.append(f"🥇 Best Seller #{rank} in {rank_cat}")
+        elif rank <= 10:
+            lines.append(f"🏆 Top 10 — #{rank} in {rank_cat}")
         elif rank <= 100:
             lines.append(f"🏆 #{rank} in {rank_cat}")
         elif rank <= 1000:
             lines.append(f"🏅 #{rank} in {rank_cat}")
+        elif rank <= 5000:
+            lines.append(f"📊 #{rank} in {rank_cat}")
 
     # ── Loyalty points ────────────────────────────────────────────────────────
     loyalty = info.get("loyalty_points", 0)
     if loyalty:
         lines.append(f"🎁 {loyalty:,} Amazon Pay points")
+
+    # ── Tech Formats (e.g. 4K, Dolby Atmos, Wi-Fi 6) ─────────────────────────
+    tech_formats = info.get("tech_formats", [])
+    if tech_formats:
+        lines.append(f"💡 {' · '.join(tech_formats)}")
 
     # ── Warranty (parsed from features) ──────────────────────────────────────
     features = info.get("features", [])
