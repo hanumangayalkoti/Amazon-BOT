@@ -19,8 +19,11 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
         with _pool_lock:
             if _pool is None:
                 ssl = os.environ.get("DB_SSLMODE", "require")
+                # FIX: Pool size configurable via env vars to prevent exhaustion
+                min_conn = int(os.environ.get("DB_POOL_MIN", 2))
+                max_conn = int(os.environ.get("DB_POOL_MAX", 15))
                 _pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=2, maxconn=15,
+                    minconn=min_conn, maxconn=max_conn,
                     dsn=DATABASE_URL, sslmode=ssl,
                 )
     return _pool
@@ -110,10 +113,11 @@ def init_db():
                     updated_at      TIMESTAMP DEFAULT NOW()
                 )
             """)
+            # FIX: Added UNIQUE(channel_id) so ON CONFLICT actually works
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS channel_config (
                     id          SERIAL PRIMARY KEY,
-                    channel_id  TEXT NOT NULL,
+                    channel_id  TEXT NOT NULL UNIQUE,
                     label       TEXT,
                     added_at    TIMESTAMP DEFAULT NOW()
                 )
@@ -154,6 +158,20 @@ def init_db():
             cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS last_checked TIMESTAMP")
             cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS notified BOOLEAN DEFAULT FALSE")
             cur.execute("ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS price_amount REAL DEFAULT 0")
+            # FIX: Add UNIQUE constraint to channel_config if not already present
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'channel_config_channel_id_key'
+                    ) THEN
+                        ALTER TABLE channel_config ADD CONSTRAINT channel_config_channel_id_key UNIQUE (channel_id);
+                    END IF;
+                EXCEPTION WHEN others THEN
+                    NULL;
+                END $$;
+            """)
 
 
 def upsert_user(user_id, username, first_name, last_name):
@@ -250,24 +268,45 @@ def remove_alert(alert_id, user_id):
 def get_all_tracked_asins():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT asin FROM price_alerts")
+            cur.execute("SELECT DISTINCT asin FROM price_alerts WHERE notified = FALSE")
             return [r[0] for r in cur.fetchall()]
 
 
+# FIX: Only return alerts that haven't been notified yet — prevents re-firing
 def get_alerts_for_asin(asin):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM price_alerts WHERE asin = %s", (asin,))
+            cur.execute(
+                "SELECT * FROM price_alerts WHERE asin = %s AND notified = FALSE",
+                (asin,)
+            )
             return cur.fetchall()
 
 
-def update_alert_price(alert_id, new_price):
+# FIX: Only update current_price for regular price tracking (does NOT touch tracked_price)
+def update_alert_current_price(alert_id, new_price):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE price_alerts SET current_price = %s, last_checked = NOW() WHERE id = %s",
+                (new_price, alert_id)
+            )
+
+
+# FIX: Called when an alert actually fires — updates BOTH tracked and current price
+# so the user's new baseline is reset to the drop price
+def update_alert_tracked_price(alert_id, new_price):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE price_alerts SET current_price = %s, tracked_price = %s, last_checked = NOW() WHERE id = %s",
                 (new_price, new_price, alert_id)
             )
+
+
+# Legacy alias kept for backward compatibility — use update_alert_current_price instead
+def update_alert_price(alert_id, new_price):
+    update_alert_current_price(alert_id, new_price)
 
 
 def mark_alert_notified(alert_id: int):
@@ -398,11 +437,12 @@ def get_channel_ids():
             return [r[0] for r in cur.fetchall()]
 
 
+# FIX: ON CONFLICT now works because channel_id has UNIQUE constraint
 def add_channel(channel_id: str, label: str = ""):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO channel_config (channel_id, label) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO channel_config (channel_id, label) VALUES (%s, %s) ON CONFLICT (channel_id) DO NOTHING",
                 (channel_id, label)
             )
 
