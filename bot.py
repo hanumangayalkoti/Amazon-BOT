@@ -100,38 +100,37 @@ def star_bar(rating: float) -> str:
     return "★" * full + "½" * half + "☆" * empty
 
 
+def _strikethrough(text: str) -> str:
+    """Unicode combining strikethrough — renders as ~~text~~ in Telegram plain text."""
+    return "".join(c + "\u0336" for c in text)
+
+
 def format_product_card(info: dict) -> str:
     lines = []
-
-    # ── Brand · Category ──────────────────────────────────────────────────────
-    brand    = info.get("brand", "")
-    category = info.get("category", "")
-    if brand and category:
-        lines.append(f"🏪 {brand}  ·  📂 {category}")
-    elif brand:
-        lines.append(f"🏪 {brand}")
-    elif category:
-        lines.append(f"📂 {category}")
 
     # ── Title ─────────────────────────────────────────────────────────────────
     title = info.get("title", "")
     if title:
-        t = title[:100] + "…" if len(title) > 100 else title
-        lines.append(f"🏷️ {t}")
+        t = title[:110] + "…" if len(title) > 110 else title
+        lines.append(f"📦 {t}")
 
-    # ── Color · Model ─────────────────────────────────────────────────────────
-    color = info.get("color", "")
-    model = info.get("model_number", "")
-    meta_parts = []
-    if color:
-        meta_parts.append(f"🎨 {color}")
-    if model and len(model) <= 35:
-        meta_parts.append(f"🔢 {model}")
-    if meta_parts:
-        lines.append("  ".join(meta_parts))
+    lines.append("")
 
-    # ── Condition (only if non-new) ────────────────────────────────────────────
+    # ── Product Details ───────────────────────────────────────────────────────
+    brand    = info.get("brand", "")
+    category = info.get("category", "")
+    color    = info.get("color", "")
+    model    = info.get("model_number", "")
     condition = info.get("condition", "")
+
+    if brand:
+        lines.append(f"🏪 Brand:     {brand}")
+    if category:
+        lines.append(f"📂 Category:  {category}")
+    if color:
+        lines.append(f"🎨 Color:     {color}")
+    if model and len(model) <= 40:
+        lines.append(f"🔩 Model:     {model}")
     if condition and condition.lower() not in ("new", ""):
         lines.append(f"📋 Condition: {condition}")
 
@@ -140,7 +139,7 @@ def format_product_card(info: dict) -> str:
     # ── Deal banner ───────────────────────────────────────────────────────────
     if info.get("is_lightning_deal"):
         end = info.get("deal_end_time", "")
-        lines.append(f"⚡ LIGHTNING DEAL{' — ends ' + end if end else ''}")
+        lines.append(f"⚡ LIMITED TIME DEAL{' — ends ' + end if end else ''}")
 
     # ── Pricing ───────────────────────────────────────────────────────────────
     mrp     = info.get("mrp", "")
@@ -149,54 +148,55 @@ def format_product_card(info: dict) -> str:
     savings = info.get("savings", "")
 
     if mrp and mrp != price:
-        lines.append(f"🏷️  MRP: {mrp}")
+        lines.append(f"💸 MRP:    {_strikethrough(mrp)}")
     if price:
-        lines.append(f"💰 Buy at: {price}")
+        lines.append(f"💰 Price:  {price}")
         if disc:
             try:
-                pct        = int(float(disc))
-                badge      = "🔥 " if pct >= 30 else ""
-                save_part  = f"  (save {savings})" if savings else ""
-                lines.append(f"{badge}📉 {pct}% off{save_part}")
+                pct       = int(float(disc))
+                badge     = "🔥 " if pct >= 30 else ""
+                save_part = f"  (you save {savings})" if savings else ""
+                lines.append(f"{badge}📉 Discount: {pct}% off{save_part}")
             except Exception:
-                lines.append(f"📉 {disc}% off")
+                lines.append(f"📉 Discount: {disc}% off")
     else:
-        lines.append("⚠️  Price — Currently Unavailable")
+        lines.append("⚠️  Price: Currently Unavailable")
 
-    # ── Stock ─────────────────────────────────────────────────────────────────
+    lines.append("")
+
+    # ── Stock & Delivery ──────────────────────────────────────────────────────
     avail = info.get("availability", "")
     if avail:
         is_in = any(w in avail.lower() for w in ["in stock", "available"])
         icon  = "✅" if is_in else "⚠️"
-        lines.append(f"📦 {icon} {avail}")
+        lines.append(f"📦 Stock:    {icon} {avail}")
     elif not price:
-        lines.append("📦 ⚠️ Out of Stock")
+        lines.append("📦 Stock:    ⚠️ Out of Stock")
 
-    # ── Delivery & Seller ─────────────────────────────────────────────────────
     if info.get("is_prime"):
-        lines.append("🚚 Prime — Free & Fast Delivery")
-    if info.get("is_amazon_seller"):
-        lines.append("✅ Sold & fulfilled by Amazon")
-        lines.append("🔄 10-day Replacement / Return Eligible")
-    else:
-        merchant = info.get("merchant_name", "")
-        if merchant:
-            lines.append(f"🏬 Seller: {merchant}")
-    lines.append("")
+        lines.append("🚚 Delivery: Prime — Free & Fast")
+    
+    merchant = info.get("merchant_name", "")
+    if merchant:
+        if info.get("is_amazon_seller"):
+            lines.append(f"🏬 Seller:   Amazon")
+            lines.append("🔄 Returns:  10-day Replacement Eligible")
+        else:
+            lines.append(f"🏬 Seller:   {merchant}")
 
     # ── Rating & Reviews ──────────────────────────────────────────────────────
     rating = info.get("rating", 0)
     rc     = info.get("review_count", 0)
+    if rating or rc:
+        lines.append("")
     if rating:
         try:
             stars    = star_bar(float(rating))
-            rev_part = f"  ({rc:,} reviews)" if rc else ""
-            lines.append(f"⭐ {stars}  {rating}/5{rev_part}")
+            lines.append(f"⭐ Rating:  {rating}/5  {stars}")
         except Exception:
-            if rc:
-                lines.append(f"💬 {rc:,} reviews")
-    elif rc:
-        lines.append(f"💬 {rc:,} reviews")
+            lines.append(f"⭐ Rating:  {rating}/5")
+    if rc:
+        lines.append(f"💬 Reviews: {rc:,} customer reviews")
 
     # ── Best Seller / Rank badge ──────────────────────────────────────────────
     rank     = info.get("sales_rank", 0)
@@ -215,23 +215,21 @@ def format_product_card(info: dict) -> str:
         elif rank <= 5000:
             lines.append(f"📊 #{rank} in {rank_cat}")
 
-    # ── Loyalty points ────────────────────────────────────────────────────────
+    # ── Extras ────────────────────────────────────────────────────────────────
     loyalty = info.get("loyalty_points", 0)
     if loyalty:
-        lines.append(f"🎁 {loyalty:,} Amazon Pay points")
+        lines.append(f"🎁 Amazon Pay: {loyalty:,} reward points")
 
-    # ── Tech Formats (e.g. 4K, Dolby Atmos, Wi-Fi 6) ─────────────────────────
     tech_formats = info.get("tech_formats", [])
     if tech_formats:
-        lines.append(f"💡 {' · '.join(tech_formats)}")
+        lines.append(f"💡 Formats:  {' · '.join(tech_formats)}")
 
-    # ── Warranty (parsed from features) ──────────────────────────────────────
     features = info.get("features", [])
     for feat in features:
         fl = feat.lower()
         if "warranty" in fl or "guarantee" in fl:
             short = feat[:80] + "…" if len(feat) > 80 else feat
-            lines.append(f"🛡️ {short}")
+            lines.append(f"🛡️ Warranty: {short}")
             break
 
     return "\n".join(lines)
@@ -354,9 +352,11 @@ async def _send_product_card(message_obj, context, info: dict, keyboard=None):
         if image:
             await message_obj.reply_photo(photo=image, caption=caption, reply_markup=kb)
         else:
-            await message_obj.reply_text(caption, reply_markup=kb)
+            await message_obj.reply_text(caption, reply_markup=kb,
+                                         disable_web_page_preview=True)
     except Exception:
-        await message_obj.reply_text(caption, reply_markup=kb)
+        await message_obj.reply_text(caption, reply_markup=kb,
+                                     disable_web_page_preview=True)
 
 
 async def _show_alerts_page(msg_or_query, context, alerts, page: int, edit: bool = False):
@@ -423,18 +423,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_new:
         await _notify_admin(context, user, total, is_new=True)
     await update.message.reply_text(
-        f"Namaste {user.first_name}! 🛍️\n\n"
-        "Main hoon Shopping GPT — tera personal Amazon India assistant!\n\n"
-        "Yeh sab kar sakta hoon:\n"
-        "• Amazon link ya ASIN bhejo → product card\n"
-        "• 'best headphones under 2000' type karo → 5 results\n"
-        "• 🔔 Price alert set karo (exact price ya % drop)\n"
-        "• ⚖️ /compare — 3 products compare karo\n"
-        "• 💾 Wishlist mein save karo\n"
-        "• 🤖 /simi — Simi se shopping advice lo\n"
-        "• 📋 /deals — Aaj ki best deals\n"
-        "• ⚙️ /settings — Apni categories choose karo\n\n"
-        "Seedha link bhejo ya kuch bolo — shuru karte hain! 👇"
+        f"Namaste {user.first_name}! 🙏 Shopping GPT mein aapka swagat hai!\n\n"
+        "Main aapka personal Amazon India shopping assistant hoon — "
+        "price track karne se lekar best deal dhundne tak, sab kuch yahan hoga.\n\n"
+        "📌 Aap kya kar sakte hain:\n\n"
+        "🔗 Amazon link ya ASIN bhejiye\n"
+        "   → Price, discount, rating, stock — sab ek jagah\n\n"
+        "🔍 Search kijiye apni bhasha mein\n"
+        "   → Jaise: 'best earbuds under 1500' ya 'Samsung phone 15000 mein'\n\n"
+        "🔔 Price Alert lagaiye\n"
+        "   → Jab price gire, seedha aapko notify karunga\n\n"
+        "⚖️ Products compare kijiye — /compare\n"
+        "   → 3 products ek saath side-by-side\n\n"
+        "💾 Wishlist banayiye — /mywishlist\n"
+        "   → Save karein, price girne pe alert milega\n\n"
+        "🤖 Simi AI se baat kijiye — /simi\n"
+        "   → Hinglish mein shopping advice, recommendations\n\n"
+        "📋 Aaj ki deals — /deals\n\n"
+        "Bas koi bhi Amazon link bhejiye ya kuch type kijiye — main haazir hoon! 😊"
     )
 
 
@@ -534,14 +540,14 @@ async def cmd_simi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["simi_active"] = True
     context.user_data["simi_history"] = []
     context.user_data["simi_context"] = {}
-    first = update.effective_user.first_name or "dost"
+    first = update.effective_user.first_name or "aap"
     await update.message.reply_text(
         f"🟢 Simi Mode ON\n\n"
-        f"Hi {first}! Main hoon Simi — teri AI shopping assistant!\n\n"
+        f"Namaste {first}! Main hoon Simi — aapki AI shopping assistant! 😊\n\n"
         "Main Amazon pe seedha search kar sakti hoon, products compare kar sakti hoon,\n"
-        "aur alerts bhi set kar sakti hoon — sab ek jagah!\n\n"
-        "Bol kya chahiye 👇\n"
-        "/stop se Simi mode band karo"
+        "price alerts set kar sakti hoon — Hinglish mein baat karo, bilkul free!\n\n"
+        "Kya chahiye aapko? Batayiye 👇\n"
+        "/stop — Simi mode band karne ke liye"
     )
 
 
@@ -1205,16 +1211,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 info = await asyncio.to_thread(api.get_product_info, asin)
             except Exception:
-                await query.message.reply_text("❌ Product info nahi mili.")
+                await query.message.reply_text("❌ Product info load nahi ho saki, please dobara try karein.")
                 return
+        existing = await asyncio.to_thread(db.get_user_alerts, user.id)
+        is_update = any(a.get("asin") == asin for a in existing)
         await asyncio.to_thread(
             db.add_price_alert, user.id, asin, info.get("title", ""), info.get("price_amount", 0),
             api.build_affiliate_link(asin), "price", None
         )
-        await query.message.reply_text(
-            f"🔔 Alert set!\n📦 {info.get('title','')[:50]}\n"
-            f"💰 {info.get('price','')}\n\nPrice giregi toh seedha notify karunga! 📲"
-        )
+        if is_update:
+            await query.message.reply_text(
+                f"🔄 Alert update ho gaya!\n"
+                f"📦 {info.get('title','')[:50]}\n"
+                f"💰 Current Price: {info.get('price','')}\n\n"
+                f"Jab bhi price giregi, aapko seedha notify karunga! 📲"
+            )
+        else:
+            await query.message.reply_text(
+                f"🔔 Alert set ho gaya!\n"
+                f"📦 {info.get('title','')[:50]}\n"
+                f"💰 Current Price: {info.get('price','')}\n\n"
+                f"Jab bhi price giregi, aapko seedha notify karunga! 📲"
+            )
         return
 
     if data.startswith("alert_pct_"):
@@ -1226,19 +1244,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 info = await asyncio.to_thread(api.get_product_info, asin)
             except Exception:
-                await query.message.reply_text("❌ Product info nahi mili.")
+                await query.message.reply_text("❌ Product info load nahi ho saki, please dobara try karein.")
                 return
         current = info.get("price_amount", 0)
         target = round(current * (1 - pct / 100))
+        existing = await asyncio.to_thread(db.get_user_alerts, user.id)
+        is_update = any(a.get("asin") == asin for a in existing)
         await asyncio.to_thread(
             db.add_price_alert, user.id, asin, info.get("title", ""), current,
             api.build_affiliate_link(asin), "percent", float(pct)
         )
+        status = "🔄 Alert update ho gaya!" if is_update else "🔔 Alert set ho gaya!"
         await query.message.reply_text(
-            f"🔔 Alert set!\n📦 {info.get('title','')[:50]}\n"
-            f"💰 Current: {info.get('price','')}\n"
-            f"📉 Alert: {pct}% girne pe (≈₹{target:,.0f})\n\n"
-            f"Price {pct}% giregi toh seedha notify karunga! 📲"
+            f"{status}\n"
+            f"📦 {info.get('title','')[:50]}\n"
+            f"💰 Current Price: {info.get('price','')}\n"
+            f"📉 Trigger: {pct}% girne pe (≈₹{target:,.0f})\n\n"
+            f"Jab price {pct}% giregi, aapko seedha notify karunga! 📲"
         )
         return
 
@@ -1328,7 +1350,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Is product ke variants available nahi hain.", show_alert=True)
             return
         buttons = []
-        for v in variants[:8]:
+        for idx, v in enumerate(variants[:8], 1):
             parts = []
             if v.get("color"):
                 parts.append(v["color"])
@@ -1337,9 +1359,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if v.get("storage"):
                 parts.append(v["storage"])
             price = v.get("price", "")
-            label = " · ".join(parts) if parts else v.get("title", "Variant")[:30]
-            if price:
-                label += f" — {price}"
+            if parts:
+                label = " · ".join(parts)
+                if price:
+                    label += f" — {price}"
+            elif price:
+                label = f"Option {idx} — {price}"
+            else:
+                label = f"Option {idx} ({v.get('asin','?')[-6:]})"
             buttons.append([InlineKeyboardButton(label, callback_data=f"pinfo_{v['asin']}")])
         await query.message.reply_text(
             "🎨 Available Variants:", reply_markup=InlineKeyboardMarkup(buttons)
