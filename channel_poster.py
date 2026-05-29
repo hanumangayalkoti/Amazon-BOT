@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import database as db
 
@@ -18,7 +19,8 @@ def format_deal_message(deal: dict) -> str:
     if price:
         price_line = f"💰 {price}"
         if disc:
-            badge = "🔥 " if int(disc) >= 50 else ""
+            # FIX: int(float(disc)) to handle decimal discount strings
+            badge = "🔥 " if int(float(disc)) >= 50 else ""
             price_line += f"  ({badge}{disc}% off"
             if savings:
                 price_line += f" — save {savings}"
@@ -43,7 +45,8 @@ def format_deal_message(deal: dict) -> str:
 
 
 async def post_lightning_deal(bot, deal: dict) -> bool:
-    channel_ids = db.get_channel_ids()
+    # FIX: DB call must be wrapped in asyncio.to_thread — was blocking the event loop
+    channel_ids = await asyncio.to_thread(db.get_channel_ids)
     if not channel_ids:
         logger.info("No channels configured, skipping lightning deal post")
         return False
@@ -52,7 +55,8 @@ async def post_lightning_deal(bot, deal: dict) -> bool:
     for ch_id in channel_ids:
         try:
             sent = await bot.send_message(chat_id=ch_id, text=msg_text, disable_web_page_preview=True)
-            db.log_channel_post(deal.get("asin", ""), "lightning", sent.message_id)
+            # FIX: DB log call also wrapped in asyncio.to_thread
+            await asyncio.to_thread(db.log_channel_post, deal.get("asin", ""), "lightning", sent.message_id)
             posted = True
             logger.info("Lightning deal posted to channel %s", ch_id)
         except Exception as e:
@@ -61,7 +65,8 @@ async def post_lightning_deal(bot, deal: dict) -> bool:
 
 
 async def post_daily_digest_to_channel(bot, deals: list[dict], slot_label: str = "Subah") -> bool:
-    channel_ids = db.get_channel_ids()
+    # FIX: DB call wrapped in asyncio.to_thread
+    channel_ids = await asyncio.to_thread(db.get_channel_ids)
     if not channel_ids or not deals:
         return False
     from datetime import datetime, timezone, timedelta
@@ -74,7 +79,8 @@ async def post_daily_digest_to_channel(bot, deals: list[dict], slot_label: str =
         price = deal.get("price", "")
         disc = deal.get("discount_pct", "")
         link = deal.get("affiliate_link", "")
-        badge = "🔥 " if disc and int(disc) >= 50 else ""
+        # FIX: int(float(disc)) to handle decimal discount strings
+        badge = "🔥 " if disc and int(float(disc)) >= 50 else ""
         line = f"{i}. {title}\n   💰 {price}"
         if disc:
             line += f"  ({badge}{disc}% off)"
@@ -88,7 +94,8 @@ async def post_daily_digest_to_channel(bot, deals: list[dict], slot_label: str =
             sent = await bot.send_message(chat_id=ch_id, text=msg_text, disable_web_page_preview=True)
             for deal in deals[:5]:
                 if deal.get("asin"):
-                    db.log_channel_post(deal["asin"], "digest", sent.message_id)
+                    # FIX: DB log wrapped in asyncio.to_thread
+                    await asyncio.to_thread(db.log_channel_post, deal["asin"], "digest", sent.message_id)
             logger.info("Daily digest posted to channel %s", ch_id)
         except Exception as e:
             logger.error("Failed to post digest to %s: %s", ch_id, e)
