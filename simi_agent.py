@@ -61,7 +61,7 @@ AGENT_TOOLS = [
                     "min_price": {"type": "integer", "description": "Minimum price in INR"},
                     "min_rating": {"type": "number", "description": "Minimum star rating (1-4)"},
                     "min_saving_pct": {"type": "integer", "description": "Minimum discount %"},
-                    "sort_by": {"type": "string", "enum": ["PRICE_ASC", "PRICE_DESC", "RELEVANCE", "FEATURED"]},
+                    "sort_by": {"type": "string", "enum": ["Price:LowToHigh", "Price:HighToLow", "Relevance", "Featured", "AvgCustomerReviews", "NewestArrivals"]},
                     "item_count": {"type": "integer", "description": "Number of results (1-5)"},
                 },
                 "required": ["query"],
