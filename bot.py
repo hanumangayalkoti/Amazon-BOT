@@ -102,7 +102,9 @@ def star_bar(rating: float) -> str:
 
 def format_product_card(info: dict) -> str:
     lines = []
-    brand = info.get("brand", "")
+
+    # ── Brand · Category ──────────────────────────────────────────────────────
+    brand    = info.get("brand", "")
     category = info.get("category", "")
     if brand and category:
         lines.append(f"🏪 {brand}  ·  📂 {category}")
@@ -110,59 +112,99 @@ def format_product_card(info: dict) -> str:
         lines.append(f"🏪 {brand}")
     elif category:
         lines.append(f"📂 {category}")
+
+    # ── Title ─────────────────────────────────────────────────────────────────
     title = info.get("title", "")
     if title:
         t = title[:100] + "…" if len(title) > 100 else title
         lines.append(f"🏷️ {t}")
     lines.append("")
+
+    # ── Deal banner ───────────────────────────────────────────────────────────
     if info.get("is_lightning_deal"):
         end = info.get("deal_end_time", "")
-        lines.append(f"⚡ LIGHTNING DEAL{' — ' + end + ' tak' if end else ''}")
-    mrp = info.get("mrp", "")
-    price = info.get("price", "")
-    disc = info.get("discount_pct", "")
+        lines.append(f"⚡ LIGHTNING DEAL{' — ends ' + end if end else ''}")
+
+    # ── Pricing ───────────────────────────────────────────────────────────────
+    mrp     = info.get("mrp", "")
+    price   = info.get("price", "")
+    disc    = info.get("discount_pct", "")
     savings = info.get("savings", "")
+
     if mrp and mrp != price:
-        lines.append(f"🏷️ MRP: {mrp}")
+        lines.append(f"🏷️  MRP: {mrp}")
     if price:
-        price_line = f"💰 {price}"
+        lines.append(f"💰 Buy at: {price}")
         if disc:
-            # FIX: int(float(disc)) — handles decimal strings like "30.5"
-            badge = "🔥 " if int(float(disc)) >= 30 else ""
-            price_line += f"\n{badge}📉 {disc}% off"
-            if savings:
-                price_line += f"  (save {savings})"
-        lines.append(price_line)
+            try:
+                pct        = int(float(disc))
+                badge      = "🔥 " if pct >= 30 else ""
+                save_part  = f"  (save {savings})" if savings else ""
+                lines.append(f"{badge}📉 {pct}% off{save_part}")
+            except Exception:
+                lines.append(f"📉 {disc}% off")
     else:
-        lines.append("⚠️ Price — Currently Unavailable")
+        lines.append("⚠️  Price — Currently Unavailable")
+
+    # ── Stock ─────────────────────────────────────────────────────────────────
     avail = info.get("availability", "")
-    if avail and price:
+    if avail:
         is_in = any(w in avail.lower() for w in ["in stock", "available"])
-        icon = "✅" if is_in else "⚠️"
+        icon  = "✅" if is_in else "⚠️"
         lines.append(f"📦 {icon} {avail}")
-    elif not avail and not price:
+    elif not price:
         lines.append("📦 ⚠️ Out of Stock")
+
+    # ── Delivery & Seller ─────────────────────────────────────────────────────
+    if info.get("is_prime"):
+        lines.append("🚚 Prime — Free & Fast Delivery")
+    if info.get("is_amazon_seller"):
+        lines.append("✅ Sold & fulfilled by Amazon")
+    else:
+        merchant = info.get("merchant_name", "")
+        if merchant:
+            lines.append(f"🏬 Seller: {merchant}")
+    lines.append("")
+
+    # ── Rating & Reviews ──────────────────────────────────────────────────────
     rating = info.get("rating", 0)
-    rc = info.get("review_count", 0)
+    rc     = info.get("review_count", 0)
     if rating:
         try:
-            stars = star_bar(float(rating))
+            stars    = star_bar(float(rating))
             rev_part = f"  ({rc:,} reviews)" if rc else ""
             lines.append(f"⭐ {stars}  {rating}/5{rev_part}")
         except Exception:
             if rc:
                 lines.append(f"💬 {rc:,} reviews")
-    if info.get("is_prime"):
-        lines.append("🚀 Prime — Free & Fast Delivery")
-    if info.get("is_amazon_seller"):
-        lines.append("✅ Sold by Amazon")
-    rank = info.get("sales_rank", 0)
+    elif rc:
+        lines.append(f"💬 {rc:,} reviews")
+
+    # ── Best Seller badge ─────────────────────────────────────────────────────
+    rank     = info.get("sales_rank", 0)
     rank_cat = info.get("sales_rank_category", "")
-    if rank and rank_cat and rank <= 200:
-        lines.append(f"🏆 #{rank} in {rank_cat}")
+    if rank and rank_cat:
+        if rank <= 3:
+            lines.append(f"🥇 Best Seller #{rank} in {rank_cat}")
+        elif rank <= 100:
+            lines.append(f"🏆 #{rank} in {rank_cat}")
+        elif rank <= 1000:
+            lines.append(f"🏅 #{rank} in {rank_cat}")
+
+    # ── Loyalty points ────────────────────────────────────────────────────────
     loyalty = info.get("loyalty_points", 0)
     if loyalty:
-        lines.append(f"🎁 {loyalty} Amazon Pay points")
+        lines.append(f"🎁 {loyalty:,} Amazon Pay points")
+
+    # ── Warranty (parsed from features) ──────────────────────────────────────
+    features = info.get("features", [])
+    for feat in features:
+        fl = feat.lower()
+        if "warranty" in fl or "guarantee" in fl:
+            short = feat[:80] + "…" if len(feat) > 80 else feat
+            lines.append(f"🛡️ {short}")
+            break
+
     return "\n".join(lines)
 
 
@@ -174,26 +216,33 @@ def format_search_card(info: dict, index: int) -> str:
     brand = info.get("brand", "")
     if brand:
         lines.append(f"🏪 {brand}")
+    mrp   = info.get("mrp", "")
     price = info.get("price", "")
-    disc = info.get("discount_pct", "")
+    disc  = info.get("discount_pct", "")
+    savings = info.get("savings", "")
+    if mrp and mrp != price:
+        lines.append(f"🏷️ MRP: {mrp}")
     if price:
-        p_line = f"💰 {price}"
+        lines.append(f"💰 Buy at: {price}")
         if disc:
-            # FIX: int(float(disc)) — handles decimal strings
-            badge = "🔥 " if int(float(disc)) >= 30 else ""
-            p_line += f"  ({badge}{disc}% off)"
-        lines.append(p_line)
+            try:
+                pct       = int(float(disc))
+                badge     = "🔥 " if pct >= 30 else ""
+                save_part = f"  (save {savings})" if savings else ""
+                lines.append(f"{badge}📉 {pct}% off{save_part}")
+            except Exception:
+                lines.append(f"📉 {disc}% off")
     rating = info.get("rating", 0)
-    rc = info.get("review_count", 0)
+    rc     = info.get("review_count", 0)
     if rating:
         try:
-            stars = star_bar(float(rating))
+            stars    = star_bar(float(rating))
             rev_part = f"  ({rc:,})" if rc else ""
             lines.append(f"⭐ {stars} {rating}/5{rev_part}")
         except Exception:
             pass
     if info.get("is_prime"):
-        lines.append("🚀 Prime")
+        lines.append("🚚 Prime — Free & Fast Delivery")
     if info.get("is_lightning_deal"):
         lines.append("⚡ Lightning Deal!")
     return "\n".join(lines)
