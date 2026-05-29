@@ -9,16 +9,18 @@ import database as db
 import channel_poster as cp
 
 logger = logging.getLogger(__name__)
+# FIX: Use IST timezone (UTC+5:30) consistently
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DIGEST_SLOTS = [
-    {"hour": 3, "minute": 30, "label": "Subah",    "categories": ["women fashion", "beauty", "skincare deals"]},
-    {"hour": 6, "minute": 30, "label": "Dopahar",  "categories": ["fashion deals", "clothing", "accessories deals"]},
-    {"hour": 17, "minute": 0, "label": "Shaam",    "categories": ["home kitchen", "fashion", "beauty deals"]},
+    {"hour": 3,  "minute": 30, "label": "Subah",   "categories": ["women fashion", "beauty", "skincare deals"]},
+    {"hour": 6,  "minute": 30, "label": "Dopahar", "categories": ["fashion deals", "clothing", "accessories deals"]},
+    {"hour": 17, "minute": 0,  "label": "Shaam",   "categories": ["home kitchen", "fashion", "beauty deals"]},
 ]
 
 
 async def check_prices(bot):
+    # Only check ASINs that still have active (notified=FALSE) alerts
     asins = await asyncio.to_thread(db.get_all_tracked_asins)
     if not asins:
         return
@@ -29,19 +31,25 @@ async def check_prices(bot):
             new_price = info.get("price_amount", 0)
             if new_price:
                 await asyncio.to_thread(db.save_price_snapshot, asin, new_price)
+
+            # FIX: get_alerts_for_asin now only returns notified=FALSE alerts
             alerts = await asyncio.to_thread(db.get_alerts_for_asin, asin)
             for alert in alerts:
                 tracked = alert["tracked_price"]
                 alert_type = alert.get("alert_type", "price")
                 drop_pct = alert.get("drop_percent")
                 if not new_price:
+                    # FIX: Still update current_price even if can't fire, so display stays fresh
+                    await asyncio.to_thread(db.update_alert_current_price, alert["id"], 0)
                     continue
+
                 should_fire = False
                 if alert_type == "percent" and drop_pct:
                     target_price = tracked * (1 - drop_pct / 100)
                     should_fire = new_price <= target_price
                 else:
                     should_fire = new_price < tracked
+
                 if should_fire:
                     save = round(tracked - new_price, 2)
                     title = alert.get("product_title") or info.get("title", "Product")
@@ -61,8 +69,15 @@ async def check_prices(bot):
                                                disable_web_page_preview=True)
                     except Exception as e:
                         logger.warning("Could not notify user %s: %s", alert["user_id"], e)
-                    await asyncio.to_thread(db.update_alert_price, alert["id"], new_price)
+
+                    # FIX: Use update_alert_tracked_price (updates BOTH tracked + current)
+                    # so the new lower price becomes the new baseline before marking notified
+                    await asyncio.to_thread(db.update_alert_tracked_price, alert["id"], new_price)
                     await asyncio.to_thread(db.mark_alert_notified, alert["id"])
+                else:
+                    # FIX: Non-firing check — only update current_price, NOT tracked_price
+                    await asyncio.to_thread(db.update_alert_current_price, alert["id"], new_price)
+
             await asyncio.sleep(1)
         except Exception as e:
             logger.error("Error checking ASIN %s: %s", asin, e)
@@ -102,7 +117,8 @@ async def _run_digest_slot(bot, slot: dict):
                 price = deal.get("price", "")
                 disc = deal.get("discount_pct", "")
                 link = deal.get("affiliate_link", "")
-                badge = "🔥 " if disc and int(disc) >= 50 else ""
+                # FIX: int(float(disc)) to handle decimal discount strings like "30.5"
+                badge = "🔥 " if disc and int(float(disc)) >= 50 else ""
                 line = f"{i}. {title}\n   💰 {price}"
                 if disc:
                     line += f"  ({badge}{disc}% off)"
@@ -190,7 +206,8 @@ async def send_wishlist_updates(bot):
 
 
 def start_scheduler(bot) -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler(timezone="UTC")
+    # FIX: Use Asia/Kolkata so cron times match IST directly
+    scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(check_prices, "interval", hours=6, args=[bot], id="price_check")
     scheduler.add_job(send_morning_digest, "cron", hour=3, minute=30, args=[bot], id="morning_digest")
     scheduler.add_job(send_afternoon_digest, "cron", hour=6, minute=30, args=[bot], id="afternoon_digest")
@@ -199,5 +216,5 @@ def start_scheduler(bot) -> AsyncIOScheduler:
     scheduler.add_job(send_wishlist_updates, "cron", day_of_week="sun", hour=4, minute=30,
                       args=[bot], id="wishlist_updates")
     scheduler.start()
-    logger.info("Scheduler started — 6 jobs active")
+    logger.info("Scheduler started — 6 jobs active (Asia/Kolkata timezone)")
     return scheduler
