@@ -187,7 +187,7 @@ def _parse_item(item) -> dict:
         _dict['customerReviews'] = self.customer_reviews.to_dict()
         _dict['browseNodeInfo']  = self.browse_node_info.to_dict()
     """
-    d = item.to_dict() if hasattr(item, "to_dict") else item
+    d = item
 
     info: dict = {"asin": d.get("asin", "")}
 
