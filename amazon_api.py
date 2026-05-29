@@ -268,10 +268,17 @@ def _parse_item(item) -> dict:
     info["deal_price"] = ""
 
     # ── Customer Reviews ──────────────────────────────────────────────────────
-    rating = _safe_get(d, "customerReviews", "starRating", "value")
+    # starRating can be {"value": "3.7"} OR a plain "3.7" string — try both
+    rating = (
+        _safe_get(d, "customerReviews", "starRating", "value") or
+        _safe_get(d, "customerReviews", "starRating")
+    )
     info["rating"] = _safe_float(rating)
+
+    # count can be {"displayValue": "200"} OR {"value": 200} OR plain int
     count = (
         _safe_get(d, "customerReviews", "count", "displayValue") or
+        _safe_get(d, "customerReviews", "count", "value") or
         _safe_get(d, "customerReviews", "count")
     )
     try:
@@ -509,7 +516,9 @@ def get_product_variations(asin: str) -> list[dict]:
             "resources":  [
                 "images.primary.medium",
                 "itemInfo.title",
+                "itemInfo.productInfo",
                 "offersV2.listings.price",
+                "offersV2.listings.availability",
                 "variationSummary.variationDimension",
                 "variationSummary.price.lowestPrice",
                 "variationSummary.price.highestPrice",
