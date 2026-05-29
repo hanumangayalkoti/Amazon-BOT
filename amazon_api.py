@@ -417,7 +417,9 @@ def get_product_info(asin: str) -> dict:
             resources=resources,
         )
         resp = api.get_items(x_marketplace=MARKETPLACE, get_items_request_content=req)
-        rd   = resp.to_dict() if hasattr(resp, "to_dict") else {}
+        print("DEBUG resp type:", type(resp))
+        rd   = resp.to_dict() if hasattr(resp, "to_dict") else resp
+        print("DEBUG resp_dict keys:", list(rd.keys()) if isinstance(rd, dict) else "NOT A DICT")
         ir   = rd.get("itemsResult") or {}
         items = ir.get("items") or []
         if not items:
