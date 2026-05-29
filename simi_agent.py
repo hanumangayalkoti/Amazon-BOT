@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import logging
@@ -158,6 +159,7 @@ AGENT_TOOLS = [
 ]
 
 
+# FIX: _execute_tool is now a normal sync function called via asyncio.to_thread
 def _execute_tool(tool_name: str, args: dict, user_id: int, context_data: dict) -> str:
     import amazon_api as api
     import database as db
@@ -189,7 +191,8 @@ def _execute_tool(tool_name: str, args: dict, user_id: int, context_data: dict) 
                     "is_prime": r.get("is_prime", False),
                     "affiliate_link": r.get("affiliate_link", ""),
                 })
-                context_data["last_search_results"] = out
+            # FIX: Assign last_search_results OUTSIDE the loop
+            context_data["last_search_results"] = out
             return json.dumps({"results": out})
 
         elif tool_name == "get_product_details":
@@ -280,6 +283,8 @@ def _execute_tool(tool_name: str, args: dict, user_id: int, context_data: dict) 
         logger.error("Tool %s error: %s", tool_name, e)
         return json.dumps({"error": str(e)})
 
+    return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
 
 async def run_simi_agent(
     user_id: int,
@@ -305,13 +310,16 @@ async def run_simi_agent(
     max_iterations = 5
     for _ in range(max_iterations):
         try:
-            resp = _client.chat.completions.create(
-                model=AGENT_MODEL,
-                messages=messages,
-                tools=AGENT_TOOLS,
-                tool_choice="auto",
-                max_tokens=800,
-                temperature=0.3,
+            # FIX: Wrap blocking OpenAI call in asyncio.to_thread so event loop isn't blocked
+            resp = await asyncio.to_thread(
+                lambda: _client.chat.completions.create(
+                    model=AGENT_MODEL,
+                    messages=messages,
+                    tools=AGENT_TOOLS,
+                    tool_choice="auto",
+                    max_tokens=800,
+                    temperature=0.3,
+                )
             )
         except Exception as e:
             logger.error("Simi agent OpenAI call error: %s", e)
@@ -331,12 +339,15 @@ async def run_simi_agent(
             for tc in msg.tool_calls
         ]})
 
+        # FIX: Execute each tool via asyncio.to_thread — avoids blocking DB/API calls
         for tc in msg.tool_calls:
             try:
                 args = json.loads(tc.function.arguments)
             except Exception:
                 args = {}
-            result = _execute_tool(tc.function.name, args, user_id, context_data)
+            result = await asyncio.to_thread(
+                _execute_tool, tc.function.name, args, user_id, context_data
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
