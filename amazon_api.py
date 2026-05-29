@@ -418,7 +418,7 @@ def get_product_info(asin: str) -> dict:
         )
         resp = api.get_items(x_marketplace=MARKETPLACE, get_items_request_content=req)
         rd   = resp.to_dict() if hasattr(resp, "to_dict") else {}
-        ir   = rd.get("itemsResult") or rd.get("itemsResult") or {}
+        ir   = rd.get("itemsResult") or {}
         items = ir.get("items") or []
         if not items:
             raise ValueError(f"Product not found: {asin}")
@@ -480,7 +480,7 @@ def search_products(
         req  = SearchItemsRequestContent(**kwargs)
         resp = api.search_items(x_marketplace=MARKETPLACE, search_items_request_content=req)
         rd   = resp.to_dict() if hasattr(resp, "to_dict") else {}
-        sr   = rd.get("searchResult") or rd.get("searchResult") or {}
+        sr   = rd.get("searchResult") or {}
         items = sr.get("items") or []
         return [_parse_item(i) for i in items]
 
