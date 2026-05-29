@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest
 
 import database as db
 
@@ -117,7 +118,8 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["👥 Last 10 Joined Users\n"]
     for r in rows:
         name = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
-        uname = f"@{r['username']}" if r.get("username") else "No username"
+        # FIX: Use .get() instead of r['username'] to prevent KeyError when username is None
+        uname = f"@{r.get('username')}" if r.get("username") else "No username"
         raw_ts = r.get("joined_at")
         if raw_ts:
             if raw_ts.tzinfo is None:
@@ -256,7 +258,8 @@ async def show_user_selection_page(query_or_msg, context, page: int, edit: bool 
     for u in users:
         uid = u["user_id"]
         name = u.get("first_name") or "User"
-        uname = f"@{u['username']}" if u.get("username") else f"ID:{uid}"
+        # FIX: Use .get() to avoid KeyError if username is None
+        uname = f"@{u.get('username')}" if u.get("username") else f"ID:{uid}"
         check = "✅" if uid in selected else "☐"
         buttons.append([InlineKeyboardButton(
             f"{check} {name} ({uname})", callback_data=f"bc_toggle_{uid}",
@@ -276,7 +279,11 @@ async def show_user_selection_page(query_or_msg, context, page: int, edit: bool 
     if edit:
         try:
             await query_or_msg.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            pass
+        except BadRequest as e:
+            # FIX: Ignore "message is not modified" error — harmless pagination edge case
+            if "message is not modified" not in str(e).lower():
+                logger.warning("edit_text BadRequest: %s", e)
+        except Exception as e:
+            logger.warning("show_user_selection_page edit error: %s", e)
     else:
         await query_or_msg.message.reply_text(text, reply_markup=kb)
