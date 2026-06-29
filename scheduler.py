@@ -7,20 +7,56 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import amazon_api as api
 import database as db
 import channel_poster as cp
+import admin as adm
 
 logger = logging.getLogger(__name__)
-# FIX: Use IST timezone (UTC+5:30) consistently
 IST = timezone(timedelta(hours=5, minutes=30))
 
-DIGEST_SLOTS = [
-    {"hour": 3,  "minute": 30, "label": "Subah",   "categories": ["women fashion", "beauty", "skincare deals"]},
-    {"hour": 6,  "minute": 30, "label": "Dopahar", "categories": ["fashion deals", "clothing", "accessories deals"]},
-    {"hour": 17, "minute": 0,  "label": "Shaam",   "categories": ["home kitchen", "fashion", "beauty deals"]},
-]
+DEDUP_DAYS = 15
+
+
+async def post_hourly_deals(bot):
+    """
+    Core hourly job: fetch best scored deals, deduplicate (15 days),
+    and post photo cards to channels + digest users.
+    Runs every hour from 10am to 10pm IST.
+    """
+    now_ist = datetime.now(IST)
+    logger.info("Hourly deals job started — %s IST", now_ist.strftime("%d %b %Y %I:%M %p"))
+
+    try:
+        pool = await asyncio.to_thread(api.get_best_deals_scored, count=20)
+    except Exception as e:
+        logger.error("get_best_deals_scored failed: %s", e)
+        return
+
+    if not pool:
+        logger.warning("No scored deals returned from API")
+        return
+
+    fresh_deals = []
+    for deal in pool:
+        asin = deal.get("asin", "")
+        if not asin:
+            continue
+        already_posted = await asyncio.to_thread(db.was_posted_in_days, asin, DEDUP_DAYS)
+        if already_posted:
+            logger.debug("Skipping ASIN %s — posted within last %d days", asin, DEDUP_DAYS)
+            continue
+        fresh_deals.append(deal)
+        if len(fresh_deals) >= 5:
+            break
+
+    if not fresh_deals:
+        logger.info("All top deals already posted in last %d days — skipping this hour", DEDUP_DAYS)
+        return
+
+    logger.info("Posting %d fresh deal cards", len(fresh_deals))
+    await cp.post_deals_to_all(bot, fresh_deals, category="best_deals")
 
 
 async def check_prices(bot):
-    # Only check ASINs that still have active (notified=FALSE) alerts
+    """Price alert checker — runs every 6 hours."""
     asins = await asyncio.to_thread(db.get_all_tracked_asins)
     if not asins:
         return
@@ -32,14 +68,12 @@ async def check_prices(bot):
             if new_price:
                 await asyncio.to_thread(db.save_price_snapshot, asin, new_price)
 
-            # FIX: get_alerts_for_asin now only returns notified=FALSE alerts
             alerts = await asyncio.to_thread(db.get_alerts_for_asin, asin)
             for alert in alerts:
                 tracked = alert["tracked_price"]
                 alert_type = alert.get("alert_type", "price")
                 drop_pct = alert.get("drop_percent")
                 if not new_price:
-                    # FIX: Still update current_price even if can't fire, so display stays fresh
                     await asyncio.to_thread(db.update_alert_current_price, alert["id"], 0)
                     continue
 
@@ -70,12 +104,9 @@ async def check_prices(bot):
                     except Exception as e:
                         logger.warning("Could not notify user %s: %s", alert["user_id"], e)
 
-                    # FIX: Use update_alert_tracked_price (updates BOTH tracked + current)
-                    # so the new lower price becomes the new baseline before marking notified
                     await asyncio.to_thread(db.update_alert_tracked_price, alert["id"], new_price)
                     await asyncio.to_thread(db.mark_alert_notified, alert["id"])
                 else:
-                    # FIX: Non-firing check — only update current_price, NOT tracked_price
                     await asyncio.to_thread(db.update_alert_current_price, alert["id"], new_price)
 
             await asyncio.sleep(1)
@@ -84,74 +115,11 @@ async def check_prices(bot):
     logger.info("Price check complete")
 
 
-async def _run_digest_slot(bot, slot: dict):
-    label = slot["label"]
-    categories = slot["categories"]
-    logger.info("Running %s digest...", label)
-    try:
-        global_deals = await asyncio.to_thread(
-            api.search_deals, categories, 30, 5
-        )
-        await cp.post_daily_digest_to_channel(bot, global_deals, slot_label=label)
-    except Exception as e:
-        logger.error("Channel digest error (%s): %s", label, e)
-
-    users = await asyncio.to_thread(db.get_users_with_digest_enabled)
-    logger.info("Sending %s digest to %d users", label, len(users))
-    sent, failed = 0, 0
-    for user in users:
-        user_id = user["user_id"]
-        user_cats = list(user.get("categories") or categories)
-        try:
-            deals = await asyncio.to_thread(
-                api.search_deals, user_cats, 30, 5
-            )
-            if not deals:
-                deals = await asyncio.to_thread(api.search_deals, categories, 30, 5)
-            if not deals:
-                continue
-            now_ist = datetime.now(IST).strftime("%d %b %Y")
-            lines = [f"🎯 {label} ki Top Deals — {now_ist}\n"]
-            for i, deal in enumerate(deals[:5], 1):
-                title = (deal.get("title") or "Product")[:55]
-                price = deal.get("price", "")
-                disc = deal.get("discount_pct", "")
-                link = deal.get("affiliate_link", "")
-                # FIX: int(float(disc)) to handle decimal discount strings like "30.5"
-                badge = "🔥 " if disc and int(float(disc)) >= 50 else ""
-                line = f"{i}. {title}\n   💰 {price}"
-                if disc:
-                    line += f"  ({badge}{disc}% off)"
-                if link:
-                    line += f"\n   👉 {link}"
-                lines.append(line)
-            lines.append("\n💡 Seedha naam type karo ya link bhejo — aur info paao!")
-            await bot.send_message(chat_id=user_id, text="\n".join(lines),
-                                   disable_web_page_preview=True)
-            sent += 1
-        except Exception as e:
-            logger.warning("Digest failed for user %s: %s", user_id, e)
-            failed += 1
-        await asyncio.sleep(0.15)
-    logger.info("%s digest complete — sent: %d, failed: %d", label, sent, failed)
-
-
-async def send_morning_digest(bot):
-    await _run_digest_slot(bot, DIGEST_SLOTS[0])
-
-
-async def send_afternoon_digest(bot):
-    await _run_digest_slot(bot, DIGEST_SLOTS[1])
-
-
-async def send_evening_digest(bot):
-    await _run_digest_slot(bot, DIGEST_SLOTS[2])
-
-
 async def check_lightning_deals(bot):
+    """Check and post lightning deals every 2 hours."""
     logger.info("Checking lightning deals...")
     try:
-        keywords_list = ["fashion deals today", "beauty deals", "clothing sale"]
+        keywords_list = ["fashion deals today", "beauty deals", "electronics sale"]
         for keywords in keywords_list:
             deals = await asyncio.to_thread(api.get_lightning_deals, keywords, 10)
             for deal in deals:
@@ -168,6 +136,7 @@ async def check_lightning_deals(bot):
 
 
 async def send_wishlist_updates(bot):
+    """Weekly wishlist price-drop notifications."""
     logger.info("Running weekly wishlist check...")
     try:
         asins = await asyncio.to_thread(db.get_all_wishlist_asins)
@@ -205,16 +174,53 @@ async def send_wishlist_updates(bot):
         logger.error("Weekly wishlist update error: %s", e)
 
 
+async def send_weekly_admin_report(bot):
+    """Send weekly performance report to admin every Sunday at 9pm IST."""
+    logger.info("Sending weekly admin report...")
+    try:
+        await adm.send_weekly_report(bot)
+    except Exception as e:
+        logger.error("Weekly admin report error: %s", e)
+
+
 def start_scheduler(bot) -> AsyncIOScheduler:
-    # FIX: Use Asia/Kolkata so cron times match IST directly
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+
+    for hour in range(10, 23):
+        scheduler.add_job(
+            post_hourly_deals, "cron",
+            hour=hour, minute=0,
+            args=[bot],
+            id=f"hourly_deals_{hour}",
+        )
+
     scheduler.add_job(check_prices, "interval", hours=6, args=[bot], id="price_check")
-    scheduler.add_job(send_morning_digest, "cron", hour=3, minute=30, args=[bot], id="morning_digest")
-    scheduler.add_job(send_afternoon_digest, "cron", hour=6, minute=30, args=[bot], id="afternoon_digest")
-    scheduler.add_job(send_evening_digest, "cron", hour=17, minute=0, args=[bot], id="evening_digest")
     scheduler.add_job(check_lightning_deals, "interval", hours=2, args=[bot], id="lightning_deals")
-    scheduler.add_job(send_wishlist_updates, "cron", day_of_week="sun", hour=4, minute=30,
+    scheduler.add_job(send_wishlist_updates, "cron",
+                      day_of_week="sun", hour=4, minute=30,
                       args=[bot], id="wishlist_updates")
+    scheduler.add_job(send_weekly_admin_report, "cron",
+                      day_of_week="sun", hour=21, minute=0,
+                      args=[bot], id="weekly_admin_report")
+
     scheduler.start()
-    logger.info("Scheduler started — 6 jobs active (Asia/Kolkata timezone)")
+    logger.info(
+        "Scheduler started — hourly deals 10am-10pm IST (13 jobs), "
+        "price check 6h, lightning 2h, weekly report Sunday 9pm"
+    )
     return scheduler
+
+
+async def send_morning_digest(bot):
+    """Legacy alias — triggers hourly deals post immediately."""
+    await post_hourly_deals(bot)
+
+
+async def send_afternoon_digest(bot):
+    """Legacy alias — triggers hourly deals post immediately."""
+    await post_hourly_deals(bot)
+
+
+async def send_evening_digest(bot):
+    """Legacy alias — triggers hourly deals post immediately."""
+    await post_hourly_deals(bot)
