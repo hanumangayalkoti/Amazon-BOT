@@ -19,7 +19,6 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
         with _pool_lock:
             if _pool is None:
                 ssl = os.environ.get("DB_SSLMODE", "require")
-                # FIX: Pool size configurable via env vars to prevent exhaustion
                 min_conn = int(os.environ.get("DB_POOL_MIN", 2))
                 max_conn = int(os.environ.get("DB_POOL_MAX", 15))
                 _pool = psycopg2.pool.ThreadedConnectionPool(
@@ -113,7 +112,6 @@ def init_db():
                     updated_at      TIMESTAMP DEFAULT NOW()
                 )
             """)
-            # FIX: Added UNIQUE(channel_id) so ON CONFLICT actually works
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS channel_config (
                     id          SERIAL PRIMARY KEY,
@@ -127,6 +125,7 @@ def init_db():
                     id          SERIAL PRIMARY KEY,
                     asin        TEXT,
                     post_type   TEXT,
+                    category    TEXT DEFAULT '',
                     posted_at   TIMESTAMP DEFAULT NOW(),
                     message_id  BIGINT
                 )
@@ -153,12 +152,13 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user ON price_alerts(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_wishlist_user ON wishlist(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_clicks_user ON link_clicks(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_posts_asin ON channel_posts(asin, posted_at DESC)")
             cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS alert_type TEXT DEFAULT 'price'")
             cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS drop_percent REAL")
             cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS last_checked TIMESTAMP")
             cur.execute("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS notified BOOLEAN DEFAULT FALSE")
             cur.execute("ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS price_amount REAL DEFAULT 0")
-            # FIX: Add UNIQUE constraint to channel_config if not already present
+            cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''")
             cur.execute("""
                 DO $$
                 BEGIN
@@ -173,6 +173,8 @@ def init_db():
                 END $$;
             """)
 
+
+# ── User management ───────────────────────────────────────────────────────────
 
 def upsert_user(user_id, username, first_name, last_name):
     with get_conn() as conn:
@@ -228,6 +230,8 @@ def get_users_paginated(offset: int = 0, limit: int = 10):
             return cur.fetchall()
 
 
+# ── Price alerts ──────────────────────────────────────────────────────────────
+
 def add_price_alert(user_id, asin, product_title, current_price, affiliate_link,
                     alert_type='price', drop_percent=None):
     with get_conn() as conn:
@@ -272,7 +276,6 @@ def get_all_tracked_asins():
             return [r[0] for r in cur.fetchall()]
 
 
-# FIX: Only return alerts that haven't been notified yet — prevents re-firing
 def get_alerts_for_asin(asin):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -283,7 +286,6 @@ def get_alerts_for_asin(asin):
             return cur.fetchall()
 
 
-# FIX: Only update current_price for regular price tracking (does NOT touch tracked_price)
 def update_alert_current_price(alert_id, new_price):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -293,8 +295,6 @@ def update_alert_current_price(alert_id, new_price):
             )
 
 
-# FIX: Called when an alert actually fires — updates BOTH tracked and current price
-# so the user's new baseline is reset to the drop price
 def update_alert_tracked_price(alert_id, new_price):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -304,7 +304,6 @@ def update_alert_tracked_price(alert_id, new_price):
             )
 
 
-# Legacy alias kept for backward compatibility — use update_alert_current_price instead
 def update_alert_price(alert_id, new_price):
     update_alert_current_price(alert_id, new_price)
 
@@ -337,6 +336,8 @@ def log_click(user_id, asin):
         with conn.cursor() as cur:
             cur.execute("INSERT INTO link_clicks (user_id, asin) VALUES (%s, %s)", (user_id, asin))
 
+
+# ── Wishlist ──────────────────────────────────────────────────────────────────
 
 def add_to_wishlist(user_id, asin, product_title, price, image_url, affiliate_link, price_amount=0):
     with get_conn() as conn:
@@ -394,6 +395,8 @@ def get_wishlist_users_for_asin(asin):
             return cur.fetchall()
 
 
+# ── User preferences ──────────────────────────────────────────────────────────
+
 def get_user_preferences(user_id: int) -> dict:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -430,6 +433,8 @@ def get_users_with_digest_enabled():
             return cur.fetchall()
 
 
+# ── Channel management ────────────────────────────────────────────────────────
+
 def get_channel_ids():
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -437,7 +442,6 @@ def get_channel_ids():
             return [r[0] for r in cur.fetchall()]
 
 
-# FIX: ON CONFLICT now works because channel_id has UNIQUE constraint
 def add_channel(channel_id: str, label: str = ""):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -453,12 +457,12 @@ def remove_channel(channel_id: str):
             cur.execute("DELETE FROM channel_config WHERE channel_id = %s", (channel_id,))
 
 
-def log_channel_post(asin: str, post_type: str, message_id: int = 0):
+def log_channel_post(asin: str, post_type: str, message_id: int = 0, category: str = ""):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO channel_posts (asin, post_type, message_id) VALUES (%s, %s, %s)",
-                (asin, post_type, message_id)
+                "INSERT INTO channel_posts (asin, post_type, message_id, category) VALUES (%s, %s, %s, %s)",
+                (asin, post_type, message_id, category)
             )
 
 
@@ -472,6 +476,105 @@ def was_posted_recently(asin: str, hours: int = 24) -> bool:
             """, (asin, hours))
             return cur.fetchone() is not None
 
+
+def was_posted_in_days(asin: str, days: int = 15) -> bool:
+    """Check if an ASIN was posted as a deal in the last N days (for deduplication)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1 FROM channel_posts
+                WHERE asin = %s
+                  AND post_type = 'hourly_deal'
+                  AND posted_at > NOW() - (%s * INTERVAL '1 day')
+                LIMIT 1
+            """, (asin, days))
+            return cur.fetchone() is not None
+
+
+# ── Deal performance stats ────────────────────────────────────────────────────
+
+def get_top_posted_deals(limit: int = 10, days: int = 7):
+    """Top ASINs by number of times posted as deals in the last N days."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT asin, COUNT(*) AS post_count,
+                       MAX(posted_at) AS last_posted
+                FROM channel_posts
+                WHERE post_type = 'hourly_deal'
+                  AND posted_at > NOW() - (%s * INTERVAL '1 day')
+                GROUP BY asin
+                ORDER BY post_count DESC
+                LIMIT %s
+            """, (days, limit))
+            return cur.fetchall()
+
+
+def get_category_post_stats(days: int = 7):
+    """How many deals were posted per category in the last N days."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    COALESCE(NULLIF(category, ''), 'Unknown') AS category,
+                    COUNT(*) AS post_count
+                FROM channel_posts
+                WHERE post_type = 'hourly_deal'
+                  AND posted_at > NOW() - (%s * INTERVAL '1 day')
+                GROUP BY category
+                ORDER BY post_count DESC
+            """, (days,))
+            return cur.fetchall()
+
+
+def get_weekly_report_stats() -> dict:
+    """All stats needed for the weekly Sunday report."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM users WHERE joined_at > NOW() - INTERVAL '7 days'")
+            new_users = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM users WHERE last_seen > NOW() - INTERVAL '7 days'")
+            active_users_week = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM link_clicks WHERE clicked_at > NOW() - INTERVAL '7 days'")
+            clicks_week = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*) FROM channel_posts
+                WHERE post_type = 'hourly_deal'
+                  AND posted_at > NOW() - INTERVAL '7 days'
+            """)
+            deals_posted = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT asin, COUNT(*) AS cnt FROM link_clicks
+                WHERE clicked_at > NOW() - INTERVAL '7 days'
+                GROUP BY asin ORDER BY cnt DESC LIMIT 5
+            """)
+            top_clicked = cur.fetchall()
+
+            cur.execute("""
+                SELECT COALESCE(NULLIF(category,''), 'Unknown') AS cat, COUNT(*) AS cnt
+                FROM channel_posts
+                WHERE post_type = 'hourly_deal'
+                  AND posted_at > NOW() - INTERVAL '7 days'
+                GROUP BY cat ORDER BY cnt DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+            best_category = row[0] if row else "N/A"
+
+    return {
+        "new_users": new_users,
+        "active_users_week": active_users_week,
+        "clicks_week": clicks_week,
+        "deals_posted": deals_posted,
+        "top_clicked": top_clicked,
+        "best_category": best_category,
+    }
+
+
+# ── Budget alerts ─────────────────────────────────────────────────────────────
 
 def add_budget_alert(user_id: int, query: str, max_price: int, min_rating: float = 0):
     with get_conn() as conn:
@@ -503,6 +606,8 @@ def remove_budget_alert(alert_id: int, user_id: int):
                         (alert_id, user_id))
 
 
+# ── Referrals ─────────────────────────────────────────────────────────────────
+
 def add_referral(referrer_id: int, referred_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -519,6 +624,8 @@ def get_referral_count(referrer_id: int) -> int:
             cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = %s", (referrer_id,))
             return cur.fetchone()[0]
 
+
+# ── General stats ─────────────────────────────────────────────────────────────
 
 def get_stats():
     with get_conn() as conn:
