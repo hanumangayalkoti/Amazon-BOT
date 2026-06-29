@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import math
 import logging
 import threading
 import requests
@@ -33,8 +34,6 @@ _VERSION_TOKEN_URLS = {
     "3.3": "https://api.amazon.co.jp/auth/o2/token",
 }
 
-# v3.x → JSON body + double-colon scope
-# v2.x → form-encoded body + slash scope
 _IS_LWA = CREDENTIAL_VERSION.startswith("3.")
 _SCOPE  = "creatorsapi::default" if _IS_LWA else "creatorsapi/default"
 
@@ -52,13 +51,26 @@ _CACHE_TTL   = 900  # 15 minutes
 _token_cache: dict = {"token": None, "expires_at": 0.0}
 _token_lock = threading.Lock()
 
+# ── Best deals keyword pool (mix of all categories) ───────────────────────────
+_BEST_DEAL_KEYWORDS = [
+    "electronics sale discount",
+    "fashion clothing deals",
+    "home kitchen offers",
+    "beauty skincare sale",
+    "mobile phones discount",
+    "laptop computer deals",
+    "sports fitness discount",
+    "watches accessories sale",
+    "toys games sale",
+    "appliances offers",
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Token Management
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_token() -> str:
-    """Fetch (or return cached) OAuth Bearer token. Thread-safe."""
     with _token_lock:
         if _token_cache["token"] and time.time() < _token_cache["expires_at"]:
             return _token_cache["token"]
@@ -105,7 +117,6 @@ def _get_token() -> str:
 
 
 def _api_post(endpoint: str, payload: dict) -> dict:
-    """POST to a Creators API endpoint with Bearer auth. Returns response JSON."""
     token = _get_token()
     resp  = requests.post(
         endpoint,
@@ -132,7 +143,6 @@ def _api_post(endpoint: str, payload: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _safe_get(obj, *keys, default=None):
-    """Traverse nested dicts/objects safely."""
     for key in keys:
         if obj is None:
             return default
@@ -156,40 +166,50 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _compute_deal_score(deal: dict) -> float:
+    """
+    Smart Deal Score:
+      - Discount %   → 50% weight  (0–100 points)
+      - Rating       → 30% weight  (rating/5 * 100 points)
+      - Review count → 20% weight  (log scale, 0–100 points)
+
+    Higher score = better deal to post.
+    """
+    discount = _safe_float(deal.get("discount_pct", 0))
+    rating   = _safe_float(deal.get("rating", 0))
+    reviews  = int(deal.get("review_count", 0) or 0)
+
+    discount_score = min(discount, 100.0)
+    rating_score   = (rating / 5.0) * 100.0 if rating > 0 else 0.0
+    review_score   = min(math.log10(reviews + 1) / 4.0, 1.0) * 100.0 if reviews > 0 else 0.0
+
+    return (discount_score * 0.5) + (rating_score * 0.3) + (review_score * 0.2)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Item Parser
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _parse_item(item) -> dict:
-    """Parse one raw API item dict into the bot's standard dict."""
     d = item if isinstance(item, dict) else {}
 
     info: dict = {"asin": d.get("asin", "")}
 
-    # ── Title ─────────────────────────────────────────────────────────────────
-    info["title"] = _safe_get(d, "itemInfo", "title", "displayValue") or ""
-
-    # ── Brand ─────────────────────────────────────────────────────────────────
-    info["brand"] = _safe_get(d, "itemInfo", "byLineInfo", "brand", "displayValue") or ""
-
-    # ── Category ──────────────────────────────────────────────────────────────
+    info["title"]    = _safe_get(d, "itemInfo", "title", "displayValue") or ""
+    info["brand"]    = _safe_get(d, "itemInfo", "byLineInfo", "brand", "displayValue") or ""
     info["category"] = _safe_get(d, "itemInfo", "classifications", "productGroup", "displayValue") or ""
 
-    # ── Features ──────────────────────────────────────────────────────────────
-    features_raw = _safe_get(d, "itemInfo", "features", "displayValues") or []
+    features_raw  = _safe_get(d, "itemInfo", "features", "displayValues") or []
     info["features"] = [str(f) for f in features_raw[:8]]
 
-    # ── Image ─────────────────────────────────────────────────────────────────
     info["image_url"] = (
         _safe_get(d, "images", "primary", "large", "url") or
         _safe_get(d, "images", "primary", "medium", "url") or ""
     )
 
-    # ── First listing ─────────────────────────────────────────────────────────
     listings = _safe_get(d, "offersV2", "listings") or []
     listing  = listings[0] if listings else {}
 
-    # ── Price ─────────────────────────────────────────────────────────────────
     price_obj     = _safe_get(listing, "price") or {}
     money_obj     = price_obj.get("money") or {}
     amount        = money_obj.get("amount")
@@ -221,30 +241,22 @@ def _parse_item(item) -> dict:
         info["savings"]      = ""
         info["discount_pct"] = ""
 
-    # ── Availability ──────────────────────────────────────────────────────────
     info["availability"] = (
         _safe_get(listing, "availability", "message") or
         _safe_get(listing, "availability", "type") or ""
     )
-
-    # ── Condition ─────────────────────────────────────────────────────────────
     info["condition"] = _safe_get(listing, "condition", "displayValue") or ""
 
-    # ── Merchant ──────────────────────────────────────────────────────────────
     merchant_name         = _safe_get(listing, "merchantInfo", "name") or ""
     info["merchant_name"] = merchant_name
     info["is_amazon_seller"] = merchant_name.lower() in (
         "amazon", "amazon seller services pvt ltd", "cloudtail india pvt ltd"
     )
-
-    # ── Prime ─────────────────────────────────────────────────────────────────
     info["is_prime"] = bool(listing.get("isBuyBoxWinner") and info["is_amazon_seller"])
 
-    # ── Loyalty Points ────────────────────────────────────────────────────────
     loyalty = _safe_get(listing, "loyaltyPoints", "points")
     info["loyalty_points"] = int(_safe_float(loyalty)) if loyalty else 0
 
-    # ── Deal Details ──────────────────────────────────────────────────────────
     deal = listing.get("dealDetails") or {}
     if isinstance(deal, dict) and deal:
         deal_type                 = deal.get("accessType") or deal.get("type", "")
@@ -267,15 +279,12 @@ def _parse_item(item) -> dict:
 
     info["deal_price"] = ""
 
-    # ── Customer Reviews ──────────────────────────────────────────────────────
-    # starRating can be {"value": "3.7"} OR a plain "3.7" string — try both
     rating = (
         _safe_get(d, "customerReviews", "starRating", "value") or
         _safe_get(d, "customerReviews", "starRating")
     )
     info["rating"] = _safe_float(rating)
 
-    # count can be {"displayValue": "200"} OR {"value": 200} OR plain int
     count = (
         _safe_get(d, "customerReviews", "count", "displayValue") or
         _safe_get(d, "customerReviews", "count", "value") or
@@ -286,7 +295,6 @@ def _parse_item(item) -> dict:
     except (ValueError, TypeError):
         info["review_count"] = 0
 
-    # ── Browse Nodes / Sales Rank ─────────────────────────────────────────────
     browse_nodes = _safe_get(d, "browseNodeInfo", "browseNodes") or []
     if browse_nodes:
         node = browse_nodes[0] if isinstance(browse_nodes, list) else browse_nodes
@@ -303,12 +311,10 @@ def _parse_item(item) -> dict:
         info["sales_rank_category"] = _safe_get(
             d, "browseNodeInfo", "websiteSalesRank", "displayName") or ""
 
-    # ── Color & Model (from productInfo) ─────────────────────────────────────
     product_info = _safe_get(d, "itemInfo", "productInfo") or {}
-    info["color"] = _safe_get(product_info, "color", "displayValue") or ""
+    info["color"]        = _safe_get(product_info, "color", "displayValue") or ""
     info["model_number"] = _safe_get(product_info, "model", "displayValue") or ""
 
-    # ── Tech Formats (e.g. "4K", "Dolby Atmos", "Wi-Fi 6") ──────────────────
     tech_formats = _safe_get(d, "itemInfo", "technicalInfo", "formats", "displayValues") or []
     info["tech_formats"] = [str(f) for f in tech_formats[:3]]
 
@@ -397,7 +403,7 @@ _SEARCH_RESOURCES = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# API calls
+# Core API calls
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_product_info(asin: str) -> dict:
@@ -476,7 +482,6 @@ def search_deals(
     item_count: int = 5,
     search_index: str = "All",
 ) -> list[dict]:
-    """Tiered fallback — tries lower discount thresholds if nothing is found."""
     thresholds = [t for t in [min_saving_pct, 20, 10, 0] if t <= min_saving_pct or t == 0]
     thresholds = list(dict.fromkeys(thresholds))
 
@@ -545,3 +550,68 @@ def get_product_variations(asin: str) -> list[dict]:
     except Exception as e:
         logger.error("get_product_variations(%s) error: %s", asin, e)
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Smart Deal Scoring — NEW
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_best_deals_scored(count: int = 5, min_discount: int = 10, min_rating: float = 3.0) -> list[dict]:
+    """
+    Fetch a broad pool of deals from multiple keyword categories,
+    score each deal using discount%, rating, and review count,
+    and return the top `count` deals sorted by score (best first).
+
+    Scoring formula:
+      - Discount%   → 50% weight
+      - Rating/5    → 30% weight
+      - log(reviews)→ 20% weight
+
+    Quality filters:
+      - Must have a price
+      - Discount >= min_discount (default 10%)
+      - Rating >= min_rating (default 3.0), or unrated products allowed if discount is high
+    """
+    seen_asins: set  = set()
+    all_deals: list  = []
+
+    for keyword in _BEST_DEAL_KEYWORDS:
+        try:
+            results = search_products(
+                query=keyword,
+                item_count=10,
+                min_saving_pct=min_discount if min_discount > 0 else None,
+                sort_by="Featured",
+            )
+            for deal in results:
+                asin = deal.get("asin", "")
+                if not asin or asin in seen_asins:
+                    continue
+                price = deal.get("price_amount", 0)
+                if not price or price <= 0:
+                    continue
+                disc = _safe_float(deal.get("discount_pct", 0))
+                if disc < min_discount:
+                    continue
+                rating = _safe_float(deal.get("rating", 0))
+                if rating > 0 and rating < min_rating:
+                    continue
+                seen_asins.add(asin)
+                deal["_score"] = _compute_deal_score(deal)
+                all_deals.append(deal)
+        except Exception as e:
+            logger.warning("get_best_deals_scored keyword '%s' error: %s", keyword, e)
+            continue
+
+        time.sleep(0.3)
+
+    if not all_deals:
+        logger.warning("get_best_deals_scored: no deals found, retrying with lower threshold")
+        return get_best_deals_scored(count=count, min_discount=5, min_rating=0.0) if min_discount > 5 else []
+
+    all_deals.sort(key=lambda d: d.get("_score", 0), reverse=True)
+    logger.info(
+        "get_best_deals_scored: %d deals scored, returning top %d (best score: %.1f)",
+        len(all_deals), count, all_deals[0].get("_score", 0) if all_deals else 0
+    )
+    return all_deals[:count]
