@@ -34,7 +34,6 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 if not ADMIN_CHAT_ID:
     raise SystemExit("FATAL: ADMIN_CHAT_ID not set.")
 
-# FIX: Create a validated integer version at startup to avoid type mixing crashes
 try:
     ADMIN_CHAT_ID_INT = int(ADMIN_CHAT_ID)
 except ValueError:
@@ -73,7 +72,6 @@ def _cache_get(context: ContextTypes.DEFAULT_TYPE, asin: str) -> dict | None:
 
 
 def _clear_all_modes(context: ContextTypes.DEFAULT_TYPE):
-    # FIX: Added compare_info1/2/3 to prevent stale data after session timeout
     for key in ["compare_step", "compare_asin1", "compare_info1", "compare_asin2", "compare_info2",
                 "compare_asin3", "compare_info3", "compare_started_at",
                 "waiting_for_search", "waiting_for_track",
@@ -101,14 +99,12 @@ def star_bar(rating: float) -> str:
 
 
 def _strikethrough(text: str) -> str:
-    """Unicode combining strikethrough — renders as ~~text~~ in Telegram plain text."""
     return "".join(c + "\u0336" for c in text)
 
 
 def format_product_card(info: dict) -> str:
     lines = []
 
-    # ── Title ─────────────────────────────────────────────────────────────────
     title = info.get("title", "")
     if title:
         t = title[:110] + "…" if len(title) > 110 else title
@@ -116,7 +112,6 @@ def format_product_card(info: dict) -> str:
 
     lines.append("")
 
-    # ── Product Details ───────────────────────────────────────────────────────
     brand    = info.get("brand", "")
     category = info.get("category", "")
     color    = info.get("color", "")
@@ -136,12 +131,10 @@ def format_product_card(info: dict) -> str:
 
     lines.append("")
 
-    # ── Deal banner ───────────────────────────────────────────────────────────
     if info.get("is_lightning_deal"):
         end = info.get("deal_end_time", "")
         lines.append(f"⚡ LIMITED TIME DEAL{' — ends ' + end if end else ''}")
 
-    # ── Pricing ───────────────────────────────────────────────────────────────
     mrp     = info.get("mrp", "")
     price   = info.get("price", "")
     disc    = info.get("discount_pct", "")
@@ -164,7 +157,6 @@ def format_product_card(info: dict) -> str:
 
     lines.append("")
 
-    # ── Stock & Delivery ──────────────────────────────────────────────────────
     avail = info.get("availability", "")
     if avail:
         is_in = any(w in avail.lower() for w in ["in stock", "available"])
@@ -175,16 +167,15 @@ def format_product_card(info: dict) -> str:
 
     if info.get("is_prime"):
         lines.append("🚚 Delivery: Prime — Free & Fast")
-    
+
     merchant = info.get("merchant_name", "")
     if merchant:
         if info.get("is_amazon_seller"):
-            lines.append(f"🏬 Seller:   Amazon")
+            lines.append("🏬 Seller:   Amazon")
             lines.append("🔄 Returns:  10-day Replacement Eligible")
         else:
             lines.append(f"🏬 Seller:   {merchant}")
 
-    # ── Rating & Reviews ──────────────────────────────────────────────────────
     rating = info.get("rating", 0)
     rc     = info.get("review_count", 0)
     if rating or rc:
@@ -215,7 +206,6 @@ def format_product_card(info: dict) -> str:
         elif rank <= 5000:
             lines.append(f"📊 #{rank} in {rank_cat}")
 
-    # ── Extras ────────────────────────────────────────────────────────────────
     loyalty = info.get("loyalty_points", 0)
     if loyalty:
         lines.append(f"🎁 Amazon Pay: {loyalty:,} reward points")
@@ -327,7 +317,6 @@ async def _notify_admin(context, user, total_users: int, is_new: bool = True):
         now = datetime.now(IST)
         header = "🆕 New User!" if is_new else "🔄 Returning User"
         await context.bot.send_message(
-            # FIX: Use ADMIN_CHAT_ID_INT (validated int) instead of raw string
             chat_id=ADMIN_CHAT_ID_INT,
             text=(
                 f"{header}\n\n"
@@ -439,7 +428,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   → Save karein, price girne pe alert milega\n\n"
         "🤖 Simi AI se baat kijiye — /simi\n"
         "   → Hinglish mein shopping advice, recommendations\n\n"
-        "📋 Aaj ki deals — /deals\n\n"
+        "📋 Aaj ki deals — /deals\n"
+        "🔎 Koi bhi product dhundho — /deal <product name>\n\n"
         "Bas koi bhi Amazon link bhejiye ya kuch type kijiye — main haazir hoon! 😊"
     )
 
@@ -451,7 +441,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  Amazon link, amzn.to link, ya ASIN seedha bhejo\n\n"
         "🔍 Search:\n"
         "  'best earbuds under 2000' — directly type karo\n"
-        "  /search — bot prompt karega\n\n"
+        "  /search — bot prompt karega\n"
+        "  /deal <product> — quick deal search\n\n"
         "⚖️ Compare:\n"
         "  /compare — 3 products side-by-side\n\n"
         "🔔 Alerts:\n"
@@ -476,6 +467,56 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 Kya search karna hai? Type karo:\n"
         "Example: best gaming mouse under 2000"
     )
+
+
+async def cmd_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /deal <product name> — Quick deal search for a specific product.
+    Shows top 5 results with prices and affiliate links.
+    """
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        await update.message.reply_text(
+            "🔎 Usage: /deal <product>\n\n"
+            "Examples:\n"
+            "• /deal wireless earbuds\n"
+            "• /deal samsung 65 inch tv\n"
+            "• /deal nike running shoes"
+        )
+        return
+
+    user = update.effective_user
+    await asyncio.to_thread(db.upsert_user, user.id, user.username,
+                             user.first_name, user.last_name)
+
+    wait = await update.message.reply_text(f"🔍 '{query}' ke deals dhundh raha hoon...")
+    try:
+        results = await asyncio.to_thread(
+            api.search_products, query, 5, None, None, None, 10, "Featured"
+        )
+        if not results:
+            results = await asyncio.to_thread(api.search_products, query, 5)
+    except Exception as e:
+        logger.error("cmd_deal search error: %s", e)
+        await wait.edit_text("❌ Search mein kuch dikkat aayi. Thodi der baad try karo 🙏")
+        return
+
+    if not results:
+        await wait.edit_text(f"😕 '{query}' ke liye koi deals nahi mili. Dusre words try karo!")
+        return
+
+    await wait.edit_text(f"🎯 '{query}' — {len(results)} deals mile:")
+
+    for i, info in enumerate(results, 1):
+        asin = info.get("asin", "")
+        _cache_put(context, asin, info)
+        context.user_data[f"scard_{asin}"] = format_search_card(info, i)
+        card_text = _safe_cap(format_search_card(info, i))
+        await update.message.reply_text(
+            card_text,
+            reply_markup=search_result_keyboard(asin),
+        )
+        await asyncio.sleep(0.2)
 
 
 async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -577,7 +618,6 @@ async def cmd_deals(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price = deal.get("price", "N/A")
             disc = deal.get("discount_pct", "")
             link = deal.get("affiliate_link", "")
-            # FIX: int(float(disc)) — handles decimal strings
             badge = "🔥 " if disc and int(float(disc)) >= 50 else ""
             lines.append(f"{i}. {title}\n   💰 {price}  {badge}{disc + '% off' if disc else ''}\n   👉 {link}")
         lines.append("\n💡 Koi bhi deal ka naam type karo — main dhundh dunga!")
@@ -615,7 +655,7 @@ async def _show_settings_menu(msg_or_query, context, selected: list, digest_on: 
     text = (
         "⚙️ Teri Settings\n\n"
         "Kaunsi categories ke deals chahiye? (select karo):\n"
-        f"\nDaily Deals: {'ON — Roz 3 baar deals aayenge' if digest_on else 'OFF — Koi deals nahi aayenge'}"
+        f"\nDaily Deals: {'ON — Roz deals aayenge' if digest_on else 'OFF — Koi deals nahi aayenge'}"
     )
     if edit:
         try:
@@ -696,7 +736,6 @@ async def _do_compare(message, context, infos: list[dict]):
                 f"Product {i+1}: {info.get('title','')[:40]} at {info.get('price','N/A')}"
                 for i, info in enumerate(infos)
             )
-            # FIX: Wrap blocking OpenAI call in asyncio.to_thread
             resp = await asyncio.to_thread(
                 lambda: _client.chat.completions.create(
                     model=INTENT_MODEL,
@@ -726,7 +765,6 @@ async def _do_compare(message, context, infos: list[dict]):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # FIX: Explicit None guard instead of unsafe inline ternary
     if not update.message:
         return
     if not update.message.text:
@@ -741,8 +779,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.to_thread(db.upsert_user, user.id, user.username,
                              user.first_name, user.last_name)
 
-    # Admin broadcast message input
-    # FIX: Use str(user.id) == ADMIN_CHAT_ID (consistent string comparison)
     if context.user_data.get("awaiting_broadcast_msg") and str(user.id) == ADMIN_CHAT_ID:
         context.user_data.pop("awaiting_broadcast_msg", None)
         context.user_data["broadcast_draft"] = text
@@ -766,7 +802,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Compare timeout check
     compare_step = context.user_data.get("compare_step")
     if compare_step:
         started = context.user_data.get("compare_started_at", 0)
@@ -777,7 +812,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Compare flow — steps 1, 2, 3
     if compare_step in (1, 2, 3):
         asin, error = api.extract_asin(text)
         if error == "search":
@@ -829,7 +863,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _do_compare(update.message, context, [info1, info2, info3])
         return
 
-    # Universal: Amazon link in any mode → always show product card
     early_asin, early_error = api.extract_asin(text)
     if early_asin:
         context.user_data.pop("waiting_for_search", None)
@@ -851,13 +884,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Search mode
     if context.user_data.get("waiting_for_search"):
         context.user_data["waiting_for_search"] = False
         await _do_search(update.message, context, text)
         return
 
-    # Track mode — user sent text (not a link), search and show product cards with alert button
     if context.user_data.get("waiting_for_track"):
         context.user_data["waiting_for_track"] = False
         await update.message.reply_text(
@@ -948,7 +979,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
-    # ── Settings ──
+    # ── postnow admin callbacks ──────────────────────────────────────────────
+    if data in ("postnow_confirm", "postnow_cancel"):
+        await adm.handle_postnow_callback(query, context)
+        return
+
+    # ── Settings ──────────────────────────────────────────────────────────────
     if data.startswith("cat_toggle_"):
         cat = data[11:]
         selected = context.user_data.get("settings_selected", [])
@@ -976,7 +1012,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await asyncio.to_thread(db.set_user_preferences, user.id, selected, digest_on)
         cats_str = ", ".join(selected)
-        digest_str = "ON — Roz 3 baar deals aayenge" if digest_on else "OFF"
+        digest_str = "ON — Roz deals aayenge" if digest_on else "OFF"
         try:
             await query.message.edit_text(
                 f"✅ Settings save ho gayi!\n\n"
@@ -988,7 +1024,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Broadcast callbacks ──
+    # ── Broadcast callbacks ───────────────────────────────────────────────────
     if data == "bc_all":
         total = await asyncio.to_thread(db.get_user_count_total)
         context.user_data["broadcast_mode"] = "all"
@@ -1062,7 +1098,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning("Broadcast failed for user %s: %s", uid, e)
                 failed += 1
-            # FIX: Increased sleep to 0.1s (10 msg/sec) — safer for Telegram flood limits
             await asyncio.sleep(0.1)
             if (i + 1) % 20 == 0:
                 await asyncio.sleep(1)
@@ -1088,7 +1123,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Broadcast cancel ho gaya.")
         return
 
-    # ── Alerts page ──
+    # ── Alerts page ───────────────────────────────────────────────────────────
     if data.startswith("alerts_page_"):
         page = int(data[12:])
         alerts = context.user_data.get("my_alerts_cache", [])
@@ -1098,7 +1133,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_alerts_page(query, context, alerts, page=page, edit=True)
         return
 
-    # ── Product Info (same message edit) ──
+    # ── Product Info ──────────────────────────────────────────────────────────
     if data.startswith("pinfo_"):
         asin = data[6:]
         info = _cache_get(context, asin)
@@ -1119,7 +1154,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Back to search card ──
+    # ── Back to search card ───────────────────────────────────────────────────
     if data.startswith("sback_"):
         asin = data[6:]
         original_text = context.user_data.get(f"scard_{asin}", "")
@@ -1134,7 +1169,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
-    # ── Details (bullet points, existing card) ──
+    # ── Details ───────────────────────────────────────────────────────────────
     if data.startswith("details_"):
         asin = data[8:]
         info = _cache_get(context, asin)
@@ -1168,7 +1203,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Back to product card ──
+    # ── Back to product card ──────────────────────────────────────────────────
     if data.startswith("back_card_"):
         asin = data[10:]
         info = _cache_get(context, asin)
@@ -1189,7 +1224,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Alert options ──
+    # ── Alert options ─────────────────────────────────────────────────────────
     if data.startswith("alert_opt_"):
         asin = data[10:]
         buttons = [
@@ -1264,7 +1299,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Wishlist ──
+    # ── Wishlist ──────────────────────────────────────────────────────────────
     if data.startswith("wish_"):
         asin = data[5:]
         info = _cache_get(context, asin)
@@ -1298,7 +1333,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Remove alert ──
+    # ── Remove alert ──────────────────────────────────────────────────────────
     if data.startswith("remove_alert_"):
         alert_id = int(data[13:])
         await asyncio.to_thread(db.remove_alert, alert_id, user.id)
@@ -1310,7 +1345,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Price History ──
+    # ── Price History ─────────────────────────────────────────────────────────
     if data.startswith("history_"):
         asin = data[8:]
         rows = await asyncio.to_thread(db.get_price_history, asin, 7)
@@ -1342,7 +1377,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("\n".join(lines))
         return
 
-    # ── Variants ──
+    # ── Variants ──────────────────────────────────────────────────────────────
     if data.startswith("variants_"):
         asin = data[9:]
         variants = await asyncio.to_thread(api.get_product_variations, asin)
@@ -1373,7 +1408,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Compare start from button ──
+    # ── Compare start from button ─────────────────────────────────────────────
     if data.startswith("compare_start_"):
         asin = data[14:]
         info = _cache_get(context, asin)
@@ -1392,7 +1427,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Share ──
+    # ── Share ─────────────────────────────────────────────────────────────────
     if data.startswith("share_"):
         asin = data[6:]
         info = _cache_get(context, asin)
@@ -1431,6 +1466,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("deal", cmd_deal))
     app.add_handler(CommandHandler("compare", cmd_compare))
     app.add_handler(CommandHandler("track", cmd_track))
     app.add_handler(CommandHandler("myalerts", cmd_myalerts))
@@ -1455,6 +1491,9 @@ def main():
     app.add_handler(CommandHandler("removechannel", adm.cmd_removechannel))
     app.add_handler(CommandHandler("digest", adm.cmd_digest_manual))
     app.add_handler(CommandHandler("lightning", adm.cmd_lightning_manual))
+    app.add_handler(CommandHandler("postnow", adm.cmd_postnow))
+    app.add_handler(CommandHandler("dealstats", adm.cmd_dealstats))
+    app.add_handler(CommandHandler("categorystats", adm.cmd_categorystats))
 
     # Message & callback handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -1466,6 +1505,7 @@ def main():
         commands_user = [
             BotCommand("start", "Bot shuru karo"),
             BotCommand("search", "Products search karo"),
+            BotCommand("deal", "Quick deal dhundo — /deal <product>"),
             BotCommand("compare", "3 products compare karo"),
             BotCommand("simi", "AI shopping assistant"),
             BotCommand("deals", "Aaj ki best deals"),
@@ -1483,7 +1523,11 @@ def main():
             BotCommand("users", "User stats"),
             BotCommand("broadcast", "Broadcast message"),
             BotCommand("setchannel", "Channel set karo"),
-            BotCommand("digest", "Manual digest trigger"),
+            BotCommand("removechannel", "Channel remove karo"),
+            BotCommand("postnow", "Abhi deals post karo"),
+            BotCommand("dealstats", "Deal performance stats"),
+            BotCommand("categorystats", "Category-wise stats"),
+            BotCommand("digest", "Manual deal post trigger"),
             BotCommand("lightning", "Manual lightning check"),
             BotCommand("ping", "Bot status"),
             BotCommand("backup", "DB snapshot"),
@@ -1491,7 +1535,6 @@ def main():
         try:
             await application.bot.set_my_commands(
                 commands_user + admin_extra,
-                # FIX: Use ADMIN_CHAT_ID_INT (validated int) — prevents crash on set_my_commands
                 scope=BotCommandScopeChat(chat_id=ADMIN_CHAT_ID_INT),
             )
         except Exception:
