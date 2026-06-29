@@ -166,6 +166,27 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _hires_image(url: str) -> str:
+    """
+    Amazon image URLs contain size codes like _SL500_, _SL200_, _AC_SX300_.
+    Replace them with _SL1500_ to get the highest quality image.
+    Pehle clear aati thi kyunki directly _SL1500_ mil rahi thi —
+    ab hum force karke hamesha hi-res URL bana dete hain.
+    """
+    import re
+    if not url:
+        return url
+    # Replace _SL<number>_ patterns
+    url = re.sub(r'_SL\d+_', '_SL1500_', url)
+    # Replace _AC_SX<number>_ or _AC_SY<number>_ patterns
+    url = re.sub(r'_AC_S[XY]\d+_', '_SL1500_', url)
+    # Replace _AC_UL<number>_ patterns
+    url = re.sub(r'_AC_UL\d+_', '_SL1500_', url)
+    # Replace _SS<number>_ (square size) patterns
+    url = re.sub(r'_SS\d+_', '_SL1500_', url)
+    return url
+
+
 def _compute_deal_score(deal: dict) -> float:
     """
     Smart Deal Score:
@@ -202,10 +223,11 @@ def _parse_item(item) -> dict:
     features_raw  = _safe_get(d, "itemInfo", "features", "displayValues") or []
     info["features"] = [str(f) for f in features_raw[:8]]
 
-    info["image_url"] = (
+    raw_img = (
         _safe_get(d, "images", "primary", "large", "url") or
         _safe_get(d, "images", "primary", "medium", "url") or ""
     )
+    info["image_url"] = _hires_image(raw_img)
 
     listings = _safe_get(d, "offersV2", "listings") or []
     listing  = listings[0] if listings else {}
