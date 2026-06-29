@@ -54,7 +54,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 Channels: {ch_info}\n\n"
         f"🏆 Top Tracked:{top_lines if top_lines else chr(10) + '  None yet'}\n\n"
         f"Commands: /users /clicks /alerts /top /recent /broadcast /backup /ping\n"
-        f"/setchannel /removechannel /digest /lightning",
+        f"/setchannel /removechannel /postnow /dealstats /categorystats /digest /lightning",
         parse_mode=None,
     )
 
@@ -118,7 +118,6 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["👥 Last 10 Joined Users\n"]
     for r in rows:
         name = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or "No Name"
-        # FIX: Use .get() instead of r['username'] to prevent KeyError when username is None
         uname = f"@{r.get('username')}" if r.get("username") else "No username"
         raw_ts = r.get("joined_at")
         if raw_ts:
@@ -197,11 +196,11 @@ async def cmd_removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_digest_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update):
         return
-    await update.message.reply_text("📤 Morning digest manually trigger ho raha hai...")
-    from scheduler import send_morning_digest
+    await update.message.reply_text("📤 Deal posting manually trigger ho raha hai...")
+    from scheduler import post_hourly_deals
     try:
-        await send_morning_digest(context.bot)
-        await update.message.reply_text("✅ Digest bheja gaya!")
+        await post_hourly_deals(context.bot)
+        await update.message.reply_text("✅ Deals post ho gayi!")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -217,6 +216,129 @@ async def cmd_lightning_manual(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
+
+# ── /postnow — Manual Deal Post ───────────────────────────────────────────────
+
+async def cmd_postnow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin can manually trigger a deal post at any time."""
+    if not await _require_admin(update):
+        return
+    now = datetime.now(IST).strftime("%I:%M %p IST")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Haan, Post Karo!", callback_data="postnow_confirm"),
+        InlineKeyboardButton("❌ Cancel", callback_data="postnow_cancel"),
+    ]])
+    await update.message.reply_text(
+        f"📤 Manual Deal Post\n\n"
+        f"🕐 Abhi ka time: {now}\n\n"
+        f"Bot best scored deals fetch karega aur turant channel + users ko post karega.\n"
+        f"(15-day deduplication apply hogi)\n\n"
+        f"Confirm karo?",
+        reply_markup=kb,
+    )
+
+
+async def handle_postnow_callback(query, context):
+    """Handle postnow confirm/cancel inline buttons."""
+    data = query.data
+    if data == "postnow_cancel":
+        await query.message.edit_text("❌ Manual post cancel ho gaya.")
+        return
+
+    if data == "postnow_confirm":
+        await query.message.edit_text("⏳ Best deals fetch ho rahi hain... thoda wait karo.")
+        from scheduler import post_hourly_deals
+        try:
+            await post_hourly_deals(context.bot)
+            now = datetime.now(IST).strftime("%d %b %Y, %I:%M %p")
+            await query.message.reply_text(
+                f"✅ Manual post complete!\n🕐 {now} IST\n\nDeals channel aur users ko bhej di gayi."
+            )
+        except Exception as e:
+            logger.error("postnow error: %s", e)
+            await query.message.reply_text(f"❌ Error hua: {e}")
+
+
+# ── /dealstats — Deal Performance ─────────────────────────────────────────────
+
+async def cmd_dealstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Top deals posted in last 7 days."""
+    if not await _require_admin(update):
+        return
+    rows = await asyncio.to_thread(db.get_top_posted_deals, 10, 7)
+    if not rows:
+        await update.message.reply_text(
+            "📊 Deal Stats\n\nAbhi tak koi hourly deals post nahi ki gayi hain."
+        )
+        return
+    lines = ["📊 Top Deals — Last 7 Days (by post count)\n"]
+    for i, row in enumerate(rows, 1):
+        asin = row["asin"]
+        cnt = row["post_count"]
+        last = row["last_posted"]
+        if last and hasattr(last, "tzinfo"):
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            last_str = last.astimezone(IST).strftime("%d %b, %I:%M %p")
+        else:
+            last_str = "?"
+        lines.append(f"{i}. ASIN: {asin}\n   Posted: {cnt}x  |  Last: {last_str} IST")
+    await update.message.reply_text("\n".join(lines))
+
+
+# ── /categorystats — Category Performance ────────────────────────────────────
+
+async def cmd_categorystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Category-wise deal post stats for last 7 days."""
+    if not await _require_admin(update):
+        return
+    rows = await asyncio.to_thread(db.get_category_post_stats, 7)
+    if not rows:
+        await update.message.reply_text(
+            "📂 Category Stats\n\nAbhi tak koi categorized deals post nahi ki gayi hain."
+        )
+        return
+    lines = ["📂 Category Stats — Last 7 Days\n"]
+    for i, row in enumerate(rows, 1):
+        cat = row["category"]
+        cnt = row["post_count"]
+        lines.append(f"{i}. {cat}: {cnt} deals")
+    await update.message.reply_text("\n".join(lines))
+
+
+# ── Weekly Report (called by scheduler every Sunday 9pm IST) ─────────────────
+
+async def send_weekly_report(bot):
+    """Send weekly performance report to admin."""
+    if not ADMIN_CHAT_ID:
+        logger.warning("ADMIN_CHAT_ID not set — cannot send weekly report")
+        return
+
+    try:
+        stats = await asyncio.to_thread(db.get_weekly_report_stats)
+        now = datetime.now(IST).strftime("%d %b %Y")
+
+        top_clicked_lines = ""
+        for asin, cnt in stats.get("top_clicked", []):
+            top_clicked_lines += f"\n  • {asin}: {cnt} clicks"
+
+        report = (
+            f"📊 Weekly Report — {now} IST\n\n"
+            f"👥 New Users:      {stats['new_users']:,}\n"
+            f"✅ Active (7d):    {stats['active_users_week']:,}\n\n"
+            f"📤 Deals Posted:   {stats['deals_posted']:,}\n"
+            f"🏆 Best Category:  {stats['best_category']}\n\n"
+            f"🔗 Affiliate Clicks: {stats['clicks_week']:,}\n"
+            f"📈 Top Clicked ASINs:{top_clicked_lines if top_clicked_lines else chr(10) + '  None yet'}\n\n"
+            f"🕐 Report generated Sunday 9pm IST automatically."
+        )
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report)
+        logger.info("Weekly report sent to admin")
+    except Exception as e:
+        logger.error("send_weekly_report error: %s", e)
+
+
+# ── Broadcast ─────────────────────────────────────────────────────────────────
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update):
@@ -258,7 +380,6 @@ async def show_user_selection_page(query_or_msg, context, page: int, edit: bool 
     for u in users:
         uid = u["user_id"]
         name = u.get("first_name") or "User"
-        # FIX: Use .get() to avoid KeyError if username is None
         uname = f"@{u.get('username')}" if u.get("username") else f"ID:{uid}"
         check = "✅" if uid in selected else "☐"
         buttons.append([InlineKeyboardButton(
@@ -280,7 +401,6 @@ async def show_user_selection_page(query_or_msg, context, page: int, edit: bool 
         try:
             await query_or_msg.message.edit_text(text, reply_markup=kb)
         except BadRequest as e:
-            # FIX: Ignore "message is not modified" error — harmless pagination edge case
             if "message is not modified" not in str(e).lower():
                 logger.warning("edit_text BadRequest: %s", e)
         except Exception as e:
